@@ -29,24 +29,26 @@ MODEL_LOAD_PATH = None
 OBS_HORIZON = 2
 ACTION_EXEC_HORIZON = 8
 ACTION_PRED_HORIZON = 16
-NUM_DIFFUSION_STEPS_IN_TRAINING = 100
+NUM_DIFFUSION_STEPS_IN_TRAINING = 10
+ACTION_DIM = 2
+STATE_OBS_DIM = 2
 
 # Training  hyperparameters
 WEIGHT_DECAY = 1e-6
 LR = 1e-4
 BATCH_SIZE = 8
-NUM_EPOCHS = 200
-GRAD_CLIP_NORM = 0.1
+NUM_EPOCHS = 1
+GRAD_CLIP_NORM = 1.0
 NUM_WARMUP_STEPS = 500
 
 # Logger
-LOG_INTERVAL = 50
-
+LOG_INTERVAL = 1
 
 # TODO: Haven't added validation loop
 
 if __name__ == "__main__":
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    logger.info(f"Using device {device}")
     os.makedirs(MODEL_SAVE_DIR, exist_ok=True)
 
     # === Data ===
@@ -68,7 +70,11 @@ if __name__ == "__main__":
     )
 
     # === Model ===
-    diff_model = DiffusionPolicy().to(device)
+    diff_model = DiffusionPolicy(
+        action_dim=ACTION_DIM,
+        state_obs_dim=STATE_OBS_DIM,
+        obs_horizon=OBS_HORIZON,
+    ).to(device)
 
     # cosine noise scheduler and clip output to [-1,1]
     diff_noise_scheduler = DDPMScheduler(
@@ -119,7 +125,7 @@ if __name__ == "__main__":
             for train_batch in train_dl_pbar:
                 imgs = train_batch["image"][:, :OBS_HORIZON].to(device)
                 states = None
-                if "state_obs" in train_batch.keys():
+                if "agent_pos" in train_batch.keys():
                     states = train_batch["agent_pos"][:, :OBS_HORIZON].to(device)
                 actions = train_batch["action"][:, :ACTION_PRED_HORIZON].to(device)
 
@@ -145,7 +151,7 @@ if __name__ == "__main__":
                     noisy_actions,
                     diff_steps,
                     imgs,
-                    states,
+                    state_obs_seq=states,
                 )
 
                 loss = loss_fn(pred_noises, noises)

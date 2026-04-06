@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
-from diffusion_policy.model.visual_encoder import get_resnet, replace_bn_with_gn
+from diffusion_policy.model.visual_encoder import get_visual_encoder
 from diffusion_policy.model.denoiser import ConditionalUnet1D
+from diffusion_policy.model.diffusion_step_encoder import DiffusionStepEncoder
 
 """
 Wrapper class that wraps all components (diffusion denoiser, diff step encoder, visual encoder) into a single pytorch model
@@ -48,17 +49,13 @@ class DiffusionPolicy(nn.Module):
         kernel_size=5,
         n_groups=8,
     ):
+        super().__init__()
+
         # Visual Encoder: Resnet18 with Group Normalization, Outputs feature dim=512
-        self.visual_encoder = get_resnet("resnet18")
-        self.visual_encoder = replace_bn_with_gn(self.visual_encoder)
+        self.visual_encoder = get_visual_encoder()
 
         # Diffusion step encoder:
-        self.diffusion_step_encoder = nn.Sequential(
-            SinusoidalPositionEmbedding(diff_step_dim),
-            nn.Linear(diff_step_dim, diff_step_dim * 4),
-            nn.Mish(),
-            nn.Linear(diff_step_dim * 4, diff_step_dim),
-        )
+        self.diffusion_step_encoder = DiffusionStepEncoder(diff_step_dim)
 
         visual_obs_dim = 512
         cond_dim = (visual_obs_dim + state_obs_dim) * obs_horizon + diff_step_dim
@@ -71,6 +68,9 @@ class DiffusionPolicy(nn.Module):
             kernel_size=kernel_size,
             n_groups=n_groups,
         )
+
+        print(f"Condition features dimension: {cond_dim}")
+        print(f"Number of Parameters: {sum(p.numel() for p in self.parameters()):,}")
 
     def forward(
         self,

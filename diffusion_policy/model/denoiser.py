@@ -226,8 +226,6 @@ class ConditionalUnet1D(nn.Module):
             nn.Conv1d(start_dim, input_dim, kernel_size=1),
         )
 
-        print(f"Number of Parameters: {sum(p.numel() for p in self.parameters()):,}")
-
     def forward(
         self,
         x: torch.Tensor,
@@ -260,7 +258,6 @@ class ConditionalUnet1D(nn.Module):
             out = unet_block_2(out, cond)
             out = upsample(out)
 
-        print(out.shape)
         out = self.final_conv(out)
 
         # (B,C,T) -> (B,T,C)

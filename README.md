@@ -17,10 +17,23 @@ pip install -e .
 
 Download PushT demonstration dataset
 ```
-wget -O data/pusht_cchi_v7_replay.zarr.zip "https://drive.google.com/uc?export=download&id=1KY1InLurpMvJDRb14L9NlXT_fEsCvVUq&confirm=t"
+mkdir data
+python scripts/download_pusht_dataset.py
 ```
 
 Train
 ```
 python scripts/train.py
 ```
+
+Visualize train loss via tensorboard
+```
+tensorboard --logdir runs/
+
+
+```
+
+## TODO
+
+- I just copied dataset stuff, should probably read through it and clean it up.
+- Haven't written the inference script yet. could use DDIM from diffusers, check https://huggingface.co/learn/diffusion-course/unit2/2#faster-sampling-with-ddim

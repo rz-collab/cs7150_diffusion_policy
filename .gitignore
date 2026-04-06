@@ -4,3 +4,5 @@ data/
 uv.lock
 __pycache__/
 **/__pycache__/
+ckpts/
+runs/

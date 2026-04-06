@@ -29,3 +29,17 @@ class SinusoidalPositionEmbedding(nn.Module):
         pe = torch.stack((pe_arg.sin(), pe_arg.cos()), dim=-1)
         pe = torch.flatten(pe, start_dim=-2)  # (B, dim)
         return pe
+
+
+class DiffusionStepEncoder(nn.Module):
+    def __init__(self, diff_step_dim: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            SinusoidalPositionEmbedding(diff_step_dim),
+            nn.Linear(diff_step_dim, diff_step_dim * 4),
+            nn.Mish(),
+            nn.Linear(diff_step_dim * 4, diff_step_dim),
+        )
+
+    def forward(self, t):
+        return self.net(t)

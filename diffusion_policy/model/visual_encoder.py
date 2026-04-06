@@ -9,6 +9,12 @@ Copied from Diffusion Policy Colab's Notebook.
 """
 
 
+def get_visual_encoder() -> nn.Module:
+    resnet = get_resnet("resnet18")
+    resnet_with_gn = replace_bn_with_gn(resnet)
+    return resnet_with_gn
+
+
 def get_resnet(name: str, weights=None, **kwargs) -> nn.Module:
     """
     name: resnet18, resnet34, resnet50
