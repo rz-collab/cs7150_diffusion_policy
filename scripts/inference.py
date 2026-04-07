@@ -31,13 +31,18 @@ logger = logging.getLogger(__name__)
 MODEL_LOAD_PATH = os.path.join("ckpts", "model.pth")  # update with actual checkpoint
 
 
-def extract_state(obs, state_keys):
+# ---
+# Generated: 2026-04-07 00:00 UTC
+# Model: claude-opus-4-6
+# Prompt: Add type annotations to all functions and variables in inference.py
+# ---
+def extract_state(obs: dict[str, np.ndarray], state_keys: list[str]) -> np.ndarray:
     """Extract and concatenate state values from observation dict."""
-    parts = [np.asarray(obs[k]).flatten() for k in state_keys]
+    parts: list[np.ndarray] = [np.asarray(obs[k]).flatten() for k in state_keys]
     return np.concatenate(parts)
 
 
-def make_env(cfg):
+def make_env(cfg: dict):
     """Create environment based on config gym_api type."""
     if cfg["gym_api"] == "gymnasium":
         import gymnasium as gym
@@ -48,7 +53,7 @@ def make_env(cfg):
         from libero.libero.envs import OffScreenRenderEnv
         task_suite = benchmark.get_benchmark_dict()[cfg["env_name"]]()
         task = task_suite.get_task(0)
-        bddl_file = os.path.join(
+        bddl_file: str = os.path.join(
             get_libero_path("bddl_files"), task.problem_folder, task.bddl_file
         )
         return OffScreenRenderEnv(
@@ -58,7 +63,7 @@ def make_env(cfg):
         )
 
 
-def env_reset(env, cfg):
+def env_reset(env, cfg: dict) -> dict:
     """Reset env, returning obs dict regardless of gym API version."""
     if cfg["gym_api"] == "gymnasium":
         obs, info = env.reset()
@@ -67,18 +72,18 @@ def env_reset(env, cfg):
     return obs
 
 
-def env_step(env, action, cfg):
+def env_step(env, action: np.ndarray, cfg: dict) -> tuple[dict, float, bool]:
     """Step env, returning (obs, reward, done) regardless of gym API version."""
     if cfg["gym_api"] == "gymnasium":
         obs, reward, terminated, truncated, info = env.step(action)
-        done = terminated or truncated
+        done: bool = terminated or truncated
     else:
         obs, reward, done, info = env.step(action)
     return obs, reward, done
 
 
-def run_inference(env_key="pusht"):
-    cfg = get_env_config(env_key)
+def run_inference(env_key: str = "pusht") -> None:
+    cfg: dict = get_env_config(env_key)
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     logger.info(f"Using device {device}, environment: {env_key}")
 
@@ -89,7 +94,7 @@ def run_inference(env_key="pusht"):
         obs_horizon=cfg["obs_horizon"],
         action_horizon=cfg["action_exec_horizon"],
     )
-    stats = dataset.stats
+    stats: dict = dataset.stats
 
     # === Load model ===
     diff_model = DiffusionPolicy(
@@ -98,7 +103,7 @@ def run_inference(env_key="pusht"):
         obs_horizon=cfg["obs_horizon"],
     ).to(device)
 
-    checkpoint = torch.load(MODEL_LOAD_PATH, map_location=device, weights_only=True)
+    checkpoint: dict = torch.load(MODEL_LOAD_PATH, map_location=device, weights_only=True)
     diff_model.load_state_dict(checkpoint)
     diff_model.eval()
     logger.info(f"Loaded checkpoint from {MODEL_LOAD_PATH}")
@@ -113,21 +118,21 @@ def run_inference(env_key="pusht"):
 
     # === Environment ===
     env = make_env(cfg)
-    obs = env_reset(env, cfg)
+    obs: dict = env_reset(env, cfg)
 
     obs_images = deque(maxlen=cfg["obs_horizon"])
     obs_states = deque(maxlen=cfg["obs_horizon"])
 
     # Seed the observation buffer by repeating the first observation
-    img = obs[cfg["image_key"]]
-    state = extract_state(obs, cfg["state_keys"])
+    img: np.ndarray = obs[cfg["image_key"]]
+    state: np.ndarray = extract_state(obs, cfg["state_keys"])
     for _ in range(cfg["obs_horizon"]):
         obs_images.append(img)
         obs_states.append(state)
 
-    rewards = []
-    step_idx = 0
-    max_steps = cfg["max_steps"]
+    rewards: list[float] = []
+    step_idx: int = 0
+    max_steps: int = cfg["max_steps"]
 
     with tqdm(total=max_steps, desc="Inference") as pbar:
         while step_idx < max_steps:
@@ -137,7 +142,7 @@ def run_inference(env_key="pusht"):
             images = torch.from_numpy(images_np).float().unsqueeze(0).to(device)
 
             states_np = np.stack(list(obs_states))           # (obs_h, state_dim)
-            nstates = normalize_data(states_np, stats["agent_pos"])
+            nstates: np.ndarray = normalize_data(states_np, stats["agent_pos"])
             states = torch.from_numpy(nstates).float().unsqueeze(0).to(device)
 
             # === DDPM denoising loop ===
