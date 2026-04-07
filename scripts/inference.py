@@ -109,6 +109,7 @@ def run_inference(env_key: str = "pusht") -> None:
     logger.info(f"Loaded checkpoint from {MODEL_LOAD_PATH}")
 
     # === Noise scheduler ===
+    # Matches the code they have in their notebook
     noise_scheduler = DDPMScheduler(
         num_train_timesteps=cfg["num_diffusion_steps"],
         beta_schedule="squaredcos_cap_v2",
@@ -134,22 +135,31 @@ def run_inference(env_key: str = "pusht") -> None:
     step_idx: int = 0
     max_steps: int = cfg["max_steps"]
 
+    done = False
+
     with tqdm(total=max_steps, desc="Inference") as pbar:
-        while step_idx < max_steps:
+        while not done:
             # === Build observation tensors ===
-            images_np = np.stack(list(obs_images))          # (obs_h, H, W, 3)
+            # TODO: It seems that images are being directly inputted into the model. Will checkm with Richard on this.
+            # If images are being directly inputted into the model, then current code is ok to use and the todo can be removed.
+            # Otherwise if images aren't directly being inputted, need to update the code so the images are correctly being
+            # input into the model in the proper manner. Note that in the notebook they use a vision encoder and then input
+            # the encodings into the model directly.
+            images_np = np.stack(obs_images)          # (obs_h, H, W, 3)
             images_np = np.moveaxis(images_np, -1, 1)       # (obs_h, 3, H, W)
             images = torch.from_numpy(images_np).float().unsqueeze(0).to(device)
 
-            states_np = np.stack(list(obs_states))           # (obs_h, state_dim)
+            states_np = np.stack(obs_states)           # (obs_h, state_dim)
             nstates: np.ndarray = normalize_data(states_np, stats["agent_pos"])
             states = torch.from_numpy(nstates).float().unsqueeze(0).to(device)
 
             # === DDPM denoising loop ===
+            # 1 is used for the first since the "batch size" is 1
             noisy_actions = torch.randn(
                 (1, cfg["action_pred_horizon"], cfg["action_dim"]), device=device
             )
 
+            # Reset timesets to initial time to perform diffusion
             noise_scheduler.set_timesteps(cfg["num_diffusion_steps"])
 
             with torch.no_grad():
@@ -165,24 +175,26 @@ def run_inference(env_key: str = "pusht") -> None:
                     ).prev_sample
 
             # === Denormalize predicted actions ===
-            pred_actions = noisy_actions[0].cpu().numpy()
+            pred_actions = noisy_actions.detach().to('cpu').numpy()[0]
             pred_actions = unnormalize_data(pred_actions, stats["action"])
 
             # === Execute actions in environment ===
+            # Performs actions up to action horizon which is specified in `diffusion_policy/env_config.py`
             for i in range(cfg["action_exec_horizon"]):
-                if step_idx >= max_steps:
-                    break
-
-                action = pred_actions[i]
-                obs, reward, done = env_step(env, action, cfg)
+                obs, reward, done = env_step(env, pred_actions[i], cfg)
+                # Save Rewards
                 rewards.append(reward)
-
+                # Save observation images and state
                 obs_images.append(obs[cfg["image_key"]])
                 obs_states.append(extract_state(obs, cfg["state_keys"]))
 
+                # Update step index and progress bar
                 step_idx += 1
                 pbar.update(1)
                 pbar.set_postfix(reward=f"{reward:.3f}")
+
+                if step_idx > max_steps:
+                    done=True
 
                 if done:
                     break
