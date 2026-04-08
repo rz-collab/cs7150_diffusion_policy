@@ -1,12 +1,29 @@
 # ---
-# Generated: 2026-04-06 01:55 UTC
-# Modified: 2026-04-06 03:00 UTC
-# Model: claude-opus-4-6
-# Prompt: Read the entire project and help me finish writing the inference module
-#         for the diffusion policy PushT environment, including model loading,
-#         DDPM denoising loop, observation buffering, and environment execution.
-# Modification: Refactor to use shared env_config so environments are swappable
-#               via --env flag (e.g. --env pusht, --env libero_spatial).
+# Generated: 2026-04-06 | claude-opus-4-6
+# Prompt: Inference module for the diffusion policy PushT environment, including
+#         model loading, DDPM denoising loop, observation buffering, and
+#         environment execution.
+# Modifications:
+#   2026-04-06 | Prompt: Refactor to use shared env_config | Refactored so environments
+#               are swappable via --env flag (e.g. --env pusht, --env libero_spatial)
+#   2026-04-07 | Prompt: Add type annotations | Added type annotations to all function
+#               parameters, return types, and non-obvious variable declarations
+#   2026-04-08 | Prompt: Fix PushT observation handling | Fixed inference to handle both
+#               flat observation arrays and dict observations, with fallback to
+#               env.render() for images
+#   2026-04-07 | Prompt: Fix env visual rendering | Updated make_env to pass obs_type
+#               from config to gym.make() so observations include pixels and agent_pos
+#               as a dict
+#   2026-04-07 | Prompt: Add visual display during inference | Added standalone pygame
+#               display window for visual rendering while keeping render_mode=rgb_array
+#               for correct observation capture. Renders env frames to a 512x512 window
+#               each step
+#   2026-04-08 | Prompt: Hardcode render_mode and obs_type into make_env | Moved
+#               render_mode="rgb_array" and obs_type="pixels_agent_pos" from env config
+#               into make_env since they are fixed inference requirements
+#   2026-04-08 | Prompt: Remove dead extract functions | Removed extract_image and
+#               extract_state_from_obs since obs is always a dict now. Replaced usages
+#               with direct dict access and extract_state
 # ---
 
 # TODO: Review the code generated and make sure it works properly
@@ -19,6 +36,7 @@ import logging
 from collections import deque
 from tqdm import tqdm
 from diffusers import DDPMScheduler
+import pygame
 from diffusion_policy.model.diffusion_policy import DiffusionPolicy
 from diffusion_policy.dataset.pusht import PushTDataset, unnormalize_data, normalize_data
 from diffusion_policy.env_config import get_env_config
@@ -31,11 +49,7 @@ logger = logging.getLogger(__name__)
 MODEL_LOAD_PATH = os.path.join("ckpts", "model.pth")  # update with actual checkpoint
 
 
-# ---
-# Generated: 2026-04-07 00:00 UTC
-# Model: claude-opus-4-6
-# Prompt: Add type annotations to all functions and variables in inference.py
-# ---
+
 def extract_state(obs: dict[str, np.ndarray], state_keys: list[str]) -> np.ndarray:
     """Extract and concatenate state values from observation dict."""
     parts: list[np.ndarray] = [np.asarray(obs[k]).flatten() for k in state_keys]
@@ -47,7 +61,11 @@ def make_env(cfg: dict):
     if cfg["gym_api"] == "gymnasium":
         import gymnasium as gym
         import gym_pusht  # noqa: F401 (registers the env)
-        return gym.make(cfg["env_name"], render_mode="human")
+        return gym.make(
+            cfg["env_name"],
+            render_mode="rgb_array",
+            obs_type="pixels_agent_pos",
+        )
     elif cfg["gym_api"] == "gym":
         from libero.libero import benchmark, get_libero_path
         from libero.libero.envs import OffScreenRenderEnv
@@ -121,6 +139,11 @@ def run_inference(env_key: str = "pusht") -> None:
     env = make_env(cfg)
     obs: dict = env_reset(env, cfg)
 
+    vis_size: int = cfg.get("vis_size", 512)
+    pygame.init()
+    pygame.display.set_caption("Diffusion Policy Inference")
+    screen = pygame.display.set_mode((vis_size, vis_size))
+
     obs_images = deque(maxlen=cfg["obs_horizon"])
     obs_states = deque(maxlen=cfg["obs_horizon"])
 
@@ -188,6 +211,14 @@ def run_inference(env_key: str = "pusht") -> None:
                 obs_images.append(obs[cfg["image_key"]])
                 obs_states.append(extract_state(obs, cfg["state_keys"]))
 
+                # Render frame to pygame display
+                render_img: np.ndarray = env.render()
+                if render_img is not None:
+                    surf = pygame.surfarray.make_surface(np.transpose(render_img, (1, 0, 2)))
+                    screen.blit(pygame.transform.scale(surf, (vis_size, vis_size)), (0, 0))
+                    pygame.display.flip()
+                pygame.event.pump()
+
                 # Update step index and progress bar
                 step_idx += 1
                 pbar.update(1)
@@ -203,6 +234,7 @@ def run_inference(env_key: str = "pusht") -> None:
                 break
 
     env.close()
+    pygame.quit()
     logger.info(f"Total steps: {step_idx}, Total reward: {sum(rewards):.2f}")
     if rewards:
         logger.info(f"Max reward: {max(rewards):.3f}")
