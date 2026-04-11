@@ -37,6 +37,7 @@ from collections import deque
 from tqdm import tqdm
 from diffusers import DDPMScheduler
 import pygame
+import imageio
 from diffusion_policy.model.diffusion_policy import DiffusionPolicy
 from diffusion_policy.dataset.pusht import (
     PushTDataset,
@@ -105,7 +106,9 @@ def env_step(env, action: np.ndarray, cfg: dict) -> tuple[dict, float, bool]:
     return obs, reward, done
 
 
-def run_inference(env_key: str = "pusht") -> None:
+def run_inference(
+    env_key: str = "pusht", output_video_path: str = "inference_output.mp4"
+) -> None:
     cfg: dict = get_env_config(env_key)
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     logger.info(f"Using device {device}, environment: {env_key}")
@@ -164,6 +167,7 @@ def run_inference(env_key: str = "pusht") -> None:
         obs_states.append(state)
 
     rewards: list[float] = []
+    video_frames: list[np.ndarray] = []
     step_idx: int = 0
     max_steps: int = cfg["max_steps"]
 
@@ -172,11 +176,6 @@ def run_inference(env_key: str = "pusht") -> None:
     with tqdm(total=max_steps, desc="Inference") as pbar:
         while not done:
             # === Build observation tensors ===
-            # TODO: It seems that images are being directly inputted into the model. Will checkm with Richard on this.
-            # If images are being directly inputted into the model, then current code is ok to use and the todo can be removed.
-            # Otherwise if images aren't directly being inputted, need to update the code so the images are correctly being
-            # input into the model in the proper manner. Note that in the notebook they use a vision encoder and then input
-            # the encodings into the model directly.
             images_np = np.stack(obs_images)  # (obs_h, H, W, 3)
             images_np = np.moveaxis(images_np, -1, 1)  # (obs_h, 3, H, W)
             images = torch.from_numpy(images_np).float().unsqueeze(0).to(device)
@@ -223,6 +222,8 @@ def run_inference(env_key: str = "pusht") -> None:
                 # Render frame to pygame display
                 render_img: np.ndarray = env.render()
                 if render_img is not None:
+                    # Capture frame for video output
+                    video_frames.append(render_img)
                     surf = pygame.surfarray.make_surface(
                         np.transpose(render_img, (1, 0, 2))
                     )
@@ -246,6 +247,11 @@ def run_inference(env_key: str = "pusht") -> None:
             if done:
                 break
 
+    # === Save video ===
+    if video_frames:
+        imageio.mimwrite(output_video_path, video_frames, fps=15)
+        logger.info(f"Saved video ({len(video_frames)} frames) to {output_video_path}")
+
     env.close()
     pygame.quit()
     logger.info(f"Total steps: {step_idx}, Total reward: {sum(rewards):.2f}")
@@ -267,7 +273,13 @@ if __name__ == "__main__":
         default=None,
         help="Path to model checkpoint (overrides default)",
     )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default="inference_output.mp4",
+        help="Path to save output video (default: inference_output.mp4)",
+    )
     args = parser.parse_args()
     if args.checkpoint:
         MODEL_LOAD_PATH = args.checkpoint
-    run_inference(env_key=args.env)
+    run_inference(env_key=args.env, output_video_path=args.output)
