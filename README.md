@@ -37,6 +37,7 @@ tensorboard --logdir runs/
 
 - I just copied dataset stuff, should probably read through it and clean it up.
 - Haven't written the inference script yet. could use DDIM from diffusers, check https://huggingface.co/learn/diffusion-course/unit2/2#faster-sampling-with-ddim
+- tensorboard fix if you get the bug for no module found pkg_resources: https://github.com/Nerogar/OneTrainer/issues/1304
 
 ## Code Source
 

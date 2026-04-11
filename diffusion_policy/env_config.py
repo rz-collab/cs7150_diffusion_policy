@@ -24,7 +24,7 @@ ENV_CONFIGS = {
         "obs_horizon": 2,
         "action_exec_horizon": 8,
         "action_pred_horizon": 16,
-        "num_diffusion_steps": 10,
+        "num_diffusion_steps": 100,
         "max_steps": 300,
     },
     "libero_spatial": {
@@ -39,7 +39,7 @@ ENV_CONFIGS = {
         "obs_horizon": 2,
         "action_exec_horizon": 8,
         "action_pred_horizon": 16,
-        "num_diffusion_steps": 10,
+        "num_diffusion_steps": 100,
         "max_steps": 520,
     },
 }

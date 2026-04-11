@@ -38,7 +38,11 @@ from tqdm import tqdm
 from diffusers import DDPMScheduler
 import pygame
 from diffusion_policy.model.diffusion_policy import DiffusionPolicy
-from diffusion_policy.dataset.pusht import PushTDataset, unnormalize_data, normalize_data
+from diffusion_policy.dataset.pusht import (
+    PushTDataset,
+    unnormalize_data,
+    normalize_data,
+)
 from diffusion_policy.env_config import get_env_config
 
 logging.basicConfig(
@@ -47,7 +51,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 MODEL_LOAD_PATH = os.path.join("ckpts", "model.pth")  # update with actual checkpoint
-
 
 
 def extract_state(obs: dict[str, np.ndarray], state_keys: list[str]) -> np.ndarray:
@@ -61,6 +64,7 @@ def make_env(cfg: dict):
     if cfg["gym_api"] == "gymnasium":
         import gymnasium as gym
         import gym_pusht  # noqa: F401 (registers the env)
+
         return gym.make(
             cfg["env_name"],
             render_mode="rgb_array",
@@ -69,6 +73,7 @@ def make_env(cfg: dict):
     elif cfg["gym_api"] == "gym":
         from libero.libero import benchmark, get_libero_path
         from libero.libero.envs import OffScreenRenderEnv
+
         task_suite = benchmark.get_benchmark_dict()[cfg["env_name"]]()
         task = task_suite.get_task(0)
         bddl_file: str = os.path.join(
@@ -119,9 +124,13 @@ def run_inference(env_key: str = "pusht") -> None:
         action_dim=cfg["action_dim"],
         state_obs_dim=cfg["state_obs_dim"],
         obs_horizon=cfg["obs_horizon"],
+        diff_step_dim=128,
+        down_dims=[512, 1024, 2048],
     ).to(device)
 
-    checkpoint: dict = torch.load(MODEL_LOAD_PATH, map_location=device, weights_only=True)
+    checkpoint: dict = torch.load(
+        MODEL_LOAD_PATH, map_location=device, weights_only=True
+    )
     diff_model.load_state_dict(checkpoint)
     diff_model.eval()
     logger.info(f"Loaded checkpoint from {MODEL_LOAD_PATH}")
@@ -168,11 +177,11 @@ def run_inference(env_key: str = "pusht") -> None:
             # Otherwise if images aren't directly being inputted, need to update the code so the images are correctly being
             # input into the model in the proper manner. Note that in the notebook they use a vision encoder and then input
             # the encodings into the model directly.
-            images_np = np.stack(obs_images)          # (obs_h, H, W, 3)
-            images_np = np.moveaxis(images_np, -1, 1)       # (obs_h, 3, H, W)
+            images_np = np.stack(obs_images)  # (obs_h, H, W, 3)
+            images_np = np.moveaxis(images_np, -1, 1)  # (obs_h, 3, H, W)
             images = torch.from_numpy(images_np).float().unsqueeze(0).to(device)
 
-            states_np = np.stack(obs_states)           # (obs_h, state_dim)
+            states_np = np.stack(obs_states)  # (obs_h, state_dim)
             nstates: np.ndarray = normalize_data(states_np, stats["agent_pos"])
             states = torch.from_numpy(nstates).float().unsqueeze(0).to(device)
 
@@ -198,7 +207,7 @@ def run_inference(env_key: str = "pusht") -> None:
                     ).prev_sample
 
             # === Denormalize predicted actions ===
-            pred_actions = noisy_actions.detach().to('cpu').numpy()[0]
+            pred_actions = noisy_actions.detach().to("cpu").numpy()[0]
             pred_actions = unnormalize_data(pred_actions, stats["action"])
 
             # === Execute actions in environment ===
@@ -214,8 +223,12 @@ def run_inference(env_key: str = "pusht") -> None:
                 # Render frame to pygame display
                 render_img: np.ndarray = env.render()
                 if render_img is not None:
-                    surf = pygame.surfarray.make_surface(np.transpose(render_img, (1, 0, 2)))
-                    screen.blit(pygame.transform.scale(surf, (vis_size, vis_size)), (0, 0))
+                    surf = pygame.surfarray.make_surface(
+                        np.transpose(render_img, (1, 0, 2))
+                    )
+                    screen.blit(
+                        pygame.transform.scale(surf, (vis_size, vis_size)), (0, 0)
+                    )
                     pygame.display.flip()
                 pygame.event.pump()
 
@@ -225,7 +238,7 @@ def run_inference(env_key: str = "pusht") -> None:
                 pbar.set_postfix(reward=f"{reward:.3f}")
 
                 if step_idx > max_steps:
-                    done=True
+                    done = True
 
                 if done:
                     break
@@ -243,11 +256,15 @@ def run_inference(env_key: str = "pusht") -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run diffusion policy inference")
     parser.add_argument(
-        "--env", type=str, default="pusht",
+        "--env",
+        type=str,
+        default="pusht",
         help="Environment config key (default: pusht). See env_config.py for options.",
     )
     parser.add_argument(
-        "--checkpoint", type=str, default=None,
+        "--checkpoint",
+        type=str,
+        default=None,
         help="Path to model checkpoint (overrides default)",
     )
     args = parser.parse_args()

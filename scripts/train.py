@@ -29,15 +29,15 @@ MODEL_LOAD_PATH = None
 OBS_HORIZON = 2
 ACTION_EXEC_HORIZON = 8
 ACTION_PRED_HORIZON = 16
-NUM_DIFFUSION_STEPS_IN_TRAINING = 10
+NUM_DIFFUSION_STEPS_IN_TRAINING = 100
 ACTION_DIM = 2
 STATE_OBS_DIM = 2
 
 # Training  hyperparameters
 WEIGHT_DECAY = 1e-6
 LR = 1e-4
-BATCH_SIZE = 8
-NUM_EPOCHS = 1
+BATCH_SIZE = 64
+NUM_EPOCHS = 500
 GRAD_CLIP_NORM = 1.0
 NUM_WARMUP_STEPS = 500
 
@@ -62,7 +62,7 @@ if __name__ == "__main__":
     train_dl = DataLoader(
         train_ds,
         batch_size=BATCH_SIZE,
-        num_workers=4,
+        num_workers=8,
         shuffle=True,
         pin_memory=True,
         persistent_workers=True,
@@ -74,6 +74,8 @@ if __name__ == "__main__":
         action_dim=ACTION_DIM,
         state_obs_dim=STATE_OBS_DIM,
         obs_horizon=OBS_HORIZON,
+        diff_step_dim=128,
+        down_dims=[512, 1024, 2048],
     ).to(device)
 
     # cosine noise scheduler and clip output to [-1,1]
