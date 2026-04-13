@@ -2,35 +2,54 @@
 
 
 
-## Requirements
+## Installation
 
-Install torch with the appropriate CUDA version (check with `nvcc --version`)  \
-Install package and other dependencies. 
-```
-python -m venv .venv
-source .venv/bin/activate   # in windows: source .venv/Scripts/activate
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-pip install -e .
-```
+We will have two virtual environments, one for diffusion policy and one for LIBERO benchmarks, due to dependencies conflicts.
+
+- Diffusion Policy (our package)
+    - Install torch with the appropriate CUDA version you have (check with `nvcc --version`) 
+    - Install package and other dependencies. 
+    ```bash
+    conda create -n diff_policy python=3.13.12
+    conda activate diff_policy
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+    pip install -e .
+    ```
+
+- LIBERO (optional, only used for inference using LIBERO simulation environment): We follow their exact installation instructions, which we repeat below for convenience
+    ```bash
+    git submodule update --init
+    cd submodules/LIBERO 
+
+    conda create -n libero python=3.8.13
+    conda activate libero
+    git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git
+    pip install -r requirements.txt
+    pip install torch==1.11.0+cu113 torchvision==0.12.0+cu113 torchaudio==0.11.0 --extra-index-url https://download.pytorch.org/whl/cu113
+    pip install -e .
+    ```
 
 ## Scripts
 
+Unless specified, the default environment is `diff_policy`
+
 Download PushT demonstration dataset
-```
+```bash
 mkdir data
 python scripts/download_pusht_dataset.py
 ```
 
+Download LIBERO datasets into `data/libero` folder: \
+You can download them manually from `https://libero-project.github.io/datasets` or using their provided script (requires using `libero` conda environment), which downloads to `libero/datasets`
+
 Train
-```
+```bash
 python scripts/train.py
 ```
 
 Visualize train loss via tensorboard
-```
+```bash
 tensorboard --logdir runs/
-
-
 ```
 
 ## TODO

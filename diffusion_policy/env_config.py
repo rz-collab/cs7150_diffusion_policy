@@ -40,7 +40,7 @@ ENV_CONFIGS = {
         "action_exec_horizon": 8,
         "action_pred_horizon": 16,
         "num_diffusion_steps": 100,
-        "max_steps": 10,
+        "max_steps": 300,
     },
 }
 
