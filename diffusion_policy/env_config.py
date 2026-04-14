@@ -3,6 +3,10 @@
 # Model: claude-opus-4-6
 # Prompt: Create a shared environment config system so inference (and later training)
 #         can switch between PushT, LIBERO, and other envs via a single flag.
+# Modifications:
+#   2026-04-14 | Prompt: Add ZMQ socket support for LIBERO | Added zmq_address field
+#               to LIBERO configs so inference connects to the remote env server
+#               instead of importing libero directly
 # ---
 
 # NOTE: This is a temporary file to integrate the two different environments frameworks.
@@ -35,6 +39,7 @@ ENV_CONFIGS = {
         "image_key": "agentview_image",
         "state_keys": ["robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos"],
         "gym_api": "gym",  # 4-tuple (obs, reward, done, info)
+        "zmq_address": "tcp://localhost:5555",
         "dataset_path": "data/libero_spatial",
         "obs_horizon": 2,
         "action_exec_horizon": 8,

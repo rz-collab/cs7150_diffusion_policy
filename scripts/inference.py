@@ -24,6 +24,9 @@
 #   2026-04-08 | Prompt: Remove dead extract functions | Removed extract_image and
 #               extract_state_from_obs since obs is always a dict now. Replaced usages
 #               with direct dict access and extract_state
+#   2026-04-14 | Prompt: Use ZMQ sockets for LIBERO | Replaced direct LIBERO imports
+#               in make_env with RemoteEnv ZMQ client so LIBERO runs in its own conda
+#               env via a server, connected over a socket
 # ---
 
 # TODO: Review the code generated and make sure it works properly
@@ -61,7 +64,13 @@ def extract_state(obs: dict[str, np.ndarray], state_keys: list[str]) -> np.ndarr
 
 
 def make_env(cfg: dict):
-    """Create environment based on config gym_api type."""
+    """Create environment based on config gym_api type.
+
+    For LIBERO environments (gym_api == "gym"), connects to a remote ZMQ server
+    instead of importing libero directly. Start the server first:
+        conda activate libero
+        python scripts/libero_env_server.py --env <env_key>
+    """
     if cfg["gym_api"] == "gymnasium":
         import gymnasium as gym
         import gym_pusht  # noqa: F401 (registers the env)
@@ -72,19 +81,11 @@ def make_env(cfg: dict):
             obs_type="pixels_agent_pos",
         )
     elif cfg["gym_api"] == "gym":
-        from libero.libero import benchmark, get_libero_path
-        from libero.libero.envs import OffScreenRenderEnv
+        from diffusion_policy.remote_env import RemoteEnv
 
-        task_suite = benchmark.get_benchmark_dict()[cfg["env_name"]]()
-        task = task_suite.get_task(0)
-        bddl_file: str = os.path.join(
-            get_libero_path("bddl_files"), task.problem_folder, task.bddl_file
-        )
-        return OffScreenRenderEnv(
-            bddl_file_name=bddl_file,
-            camera_heights=cfg["image_size"],
-            camera_widths=cfg["image_size"],
-        )
+        address: str = cfg.get("zmq_address", "tcp://localhost:5555")
+        logger.info(f"Connecting to remote LIBERO env at {address}")
+        return RemoteEnv(address=address)
 
 
 def env_reset(env, cfg: dict) -> dict:
