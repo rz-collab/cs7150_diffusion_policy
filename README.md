@@ -52,10 +52,13 @@ Visualize train loss via tensorboard
 tensorboard --logdir runs/
 ```
 
-## TODO
+## Libero Dataset Notes
+- They use `Panda` robot model that has 7 revolution joints (`joint_states` dimension is 7) and a gripper of 2 DoF (fingers positions but they're symmetric, so in action space it's just one dimension).
+The action dimension is 7: (px,py,pz,rx,ry,rz,gripper) and they're relative pose command (called `OSC_POSE` controller type in robosuite)
 
-- I just copied dataset stuff, should probably read through it and clean it up.
-- Haven't written the inference script yet. could use DDIM from diffusers, check https://huggingface.co/learn/diffusion-course/unit2/2#faster-sampling-with-ddim
+
+
+## Notes
 - tensorboard fix if you get the bug for no module found pkg_resources: https://github.com/Nerogar/OneTrainer/issues/1304
 
 ## Code Source

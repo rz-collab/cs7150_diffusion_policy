@@ -45,6 +45,7 @@ NUM_WARMUP_STEPS = 500
 LOG_INTERVAL = 1
 
 # TODO: Haven't added validation loop
+# TODO: Data batch need to be preprocessed: obs horizon truncation, normalize image by /255, switch channel axis from H,W,C to C,H,W
 
 if __name__ == "__main__":
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
