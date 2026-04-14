@@ -210,7 +210,7 @@ def run_inference(
             pred_actions = unnormalize_data(pred_actions, stats["action"])
 
             # Only take action horrizon number of actions
-            start = cfg["action_exec_horizon"]
+            start = cfg["action_exec_horizon"] - 1
             end = start + cfg["action_exec_horizon"]
             action = pred_actions[start:end, :]
 
