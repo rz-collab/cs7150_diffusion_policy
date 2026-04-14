@@ -31,12 +31,16 @@
 #               now reads model_config to reconstruct the model (including language
 #               encoder settings).  Supports both new and legacy checkpoint formats.
 #               Task description passed to forward during denoising loop.
+#   2026-04-14 | Prompt: Random fallback description | Changed fallback
+#               task description selection from first entry to random.choice.
+#               Added log line showing which description is being used.
 # ---
 
 # TODO: Review the code generated and make sure it works properly
 
 import argparse
 import json
+import random
 import torch
 import numpy as np
 import os
@@ -124,14 +128,16 @@ def run_inference(
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     logger.info(f"Using device {device}, environment: {env_key}")
 
-    # If no explicit --task, use the first description from the JSON
+    # If no explicit --task, randomly select a description from the JSON
     if task_description is None and os.path.exists(TASK_DESCRIPTIONS_PATH):
         with open(TASK_DESCRIPTIONS_PATH, "r") as f:
             all_descriptions: dict = json.load(f)
         descs = all_descriptions.get(env_key, [])
         if isinstance(descs, list) and descs:
-            task_description = descs[0]
-            logger.info(f"Using description from JSON: {task_description}")
+            task_description = random.choice(descs)
+
+    if task_description is not None:
+        logger.info(f"Task description: {task_description}")
 
     # === Load dataset for normalization stats ===
     dataset = PushTDataset(
