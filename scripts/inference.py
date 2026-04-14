@@ -209,10 +209,15 @@ def run_inference(
             pred_actions = noisy_actions.detach().to("cpu").numpy()[0]
             pred_actions = unnormalize_data(pred_actions, stats["action"])
 
+            # Only take action horrizon number of actions
+            start = cfg["action_exec_horizon"] - 1
+            end = start + cfg["action_exec_horizon"]
+            action = pred_actions[start:end, :]
+
             # === Execute actions in environment ===
             # Performs actions up to action horizon which is specified in `diffusion_policy/env_config.py`
-            for i in range(cfg["action_exec_horizon"]):
-                obs, reward, done = env_step(env, pred_actions[i], cfg)
+            for i in range(len(action)):
+                obs, reward, done = env_step(env, action[i], cfg)
                 # Save Rewards
                 rewards.append(reward)
                 # Save observation images and state
