@@ -1,3 +1,25 @@
+# ---
+# Generated: 2026-04-06 | claude-opus-4-6
+# Prompt: Training loop for diffusion policy with PushT environment.
+# Modifications:
+#   2026-04-14 | Prompt: Save model config in checkpoint and support language
+#               conditioning | Checkpoint now saves model_config alongside
+#               state_dict so the model can be reconstructed at inference.
+#               Added LANG_ENCODER_TYPE / LANG_PROJ_DIM / FREEZE_LANG_ENCODER
+#               settings.  Optimizer filters out frozen parameters.
+#               TASK_DESCRIPTION passed to forward when language encoder is active.
+#   2026-04-14 | Prompt: Per-task descriptions from JSON with dropout |
+#               Descriptions loaded from data/task_descriptions.json keyed by
+#               TASK_KEY (and optional TASK_SUBTASK for LIBERO).  Passed to
+#               dataset which returns a random description per sample.
+#               LANG_DROPOUT_PROB drops language conditioning for some batches.
+#   2026-04-14 | Prompt: Move lang dropout to dataset | Removed batch-level
+#               language dropout from training loop; per-sample dropout is now
+#               handled in PushTDataset.  Removed unused random import.
+# ---
+
+import json
+
 import torch
 import torch.nn as nn
 from diffusers import EMAModel, get_scheduler, DDPMScheduler
@@ -33,11 +55,25 @@ NUM_DIFFUSION_STEPS_IN_TRAINING = 100
 ACTION_DIM = 2
 STATE_OBS_DIM = 2
 
+# Encoder setting
+# "resnet_only"     — ResNet-18 vision, no language
+# "clip_text"       — ResNet-18 vision + pretrained text encoder
+# "clip_both"       — Pretrained vision + pretrained text encoder
+# "resnet_and_text" — ResNet-18 vision + standalone text encoder
+ENCODER_TYPE = "resnet_and_text"
+PRETRAINED_MODEL = "clip-vit-b-32"  # "clip-vit-b-16", "siglip-base-patch16-224", "siglip2-base-patch16-224"
+LANG_PROJ_DIM = 256
+FREEZE_ENCODERS = True  # freeze pretrained vision/language encoder weights
+TASK_DESCRIPTIONS_PATH = os.path.join("data", "task_descriptions.json")
+TASK_KEY = "pusht"  # top-level key in task_descriptions.json
+TASK_SUBTASK: str | None = None  # subtask key for nested configs (e.g. LIBERO)
+LANG_DROPOUT_PROB = 0.1  # probability of dropping language conditioning per batch
+
 # Training  hyperparameters
 WEIGHT_DECAY = 1e-6
 LR = 1e-4
 BATCH_SIZE = 64
-NUM_EPOCHS = 500
+NUM_EPOCHS = 50
 GRAD_CLIP_NORM = 1.0
 NUM_WARMUP_STEPS = 500
 
@@ -51,12 +87,26 @@ if __name__ == "__main__":
     logger.info(f"Using device {device}")
     os.makedirs(MODEL_SAVE_DIR, exist_ok=True)
 
+    # === Load task descriptions ===
+    task_descriptions: list[str] = []
+    if ENCODER_TYPE != "resnet_only" and os.path.exists(TASK_DESCRIPTIONS_PATH):
+        with open(TASK_DESCRIPTIONS_PATH, "r") as f:
+            all_descriptions: dict = json.load(f)
+        entry = all_descriptions.get(TASK_KEY, [])
+        if isinstance(entry, dict) and TASK_SUBTASK is not None:
+            task_descriptions = entry.get(TASK_SUBTASK, [])
+        elif isinstance(entry, list):
+            task_descriptions = entry
+        logger.info(f"Loaded {len(task_descriptions)} descriptions for {TASK_KEY}")
+
     # === Data ===
     train_ds = PushTDataset(
         dataset_path=DATASET_PATH,
         pred_horizon=ACTION_PRED_HORIZON,
         obs_horizon=OBS_HORIZON,
         action_horizon=ACTION_EXEC_HORIZON,
+        descriptions=task_descriptions,
+        lang_dropout_prob=LANG_DROPOUT_PROB,
     )
 
     train_dl = DataLoader(
@@ -76,6 +126,10 @@ if __name__ == "__main__":
         obs_horizon=OBS_HORIZON,
         diff_step_dim=128,
         down_dims=[512, 1024, 2048],
+        encoder_type=ENCODER_TYPE,
+        pretrained_model=PRETRAINED_MODEL,
+        lang_proj_dim=LANG_PROJ_DIM,
+        freeze_encoders=FREEZE_ENCODERS,
     ).to(device)
 
     # cosine noise scheduler and clip output to [-1,1]
@@ -90,8 +144,10 @@ if __name__ == "__main__":
     ema = EMAModel(parameters=diff_model.parameters(), power=0.75)
 
     # === Training Modules ====
+    # Only optimize parameters that require gradients (frozen encoder excluded)
+    trainable_params = [p for p in diff_model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
-        params=diff_model.parameters(),
+        params=trainable_params,
         lr=LR,
         weight_decay=WEIGHT_DECAY,
     )
@@ -114,9 +170,12 @@ if __name__ == "__main__":
     # Continue from checkpoint if provided
     if MODEL_LOAD_PATH is not None:
         logger.info(f"Loading model checkpoint {MODEL_LOAD_PATH}")
-        diff_model.load_state_dict(
-            torch.load(MODEL_LOAD_PATH, map_location=device, weights_only=True)
-        )
+        checkpoint = torch.load(MODEL_LOAD_PATH, map_location=device, weights_only=True)
+        # Support both new format (dict with model_config) and legacy (bare state_dict)
+        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+            diff_model.load_state_dict(checkpoint["model_state_dict"])
+        else:
+            diff_model.load_state_dict(checkpoint)
 
     try:
         tepoch_range = tqdm(range(NUM_EPOCHS), desc="Epoch")
@@ -154,6 +213,7 @@ if __name__ == "__main__":
                     diff_steps,
                     imgs,
                     state_obs_seq=states,
+                    task_description=list(train_batch["description"]),
                 )
 
                 loss = loss_fn(pred_noises, noises)
@@ -191,6 +251,12 @@ if __name__ == "__main__":
         logger.info(f"Saving model checkpoint at {output_model_path}")
 
         ema.copy_to(diff_model.parameters())
-        torch.save(diff_model.state_dict(), output_model_path)
+        torch.save(
+            {
+                "model_state_dict": diff_model.state_dict(),
+                "model_config": diff_model.model_config,
+            },
+            output_model_path,
+        )
 
         writer.close()

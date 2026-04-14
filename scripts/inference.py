@@ -27,11 +27,16 @@
 #   2026-04-14 | Prompt: Use ZMQ sockets for LIBERO | Replaced direct LIBERO imports
 #               in make_env with RemoteEnv ZMQ client so LIBERO runs in its own conda
 #               env via a server, connected over a socket
+#   2026-04-14 | Prompt: Support language-conditioned checkpoints | Checkpoint loading
+#               now reads model_config to reconstruct the model (including language
+#               encoder settings).  Supports both new and legacy checkpoint formats.
+#               Task description passed to forward during denoising loop.
 # ---
 
 # TODO: Review the code generated and make sure it works properly
 
 import argparse
+import json
 import torch
 import numpy as np
 import os
@@ -107,12 +112,26 @@ def env_step(env, action: np.ndarray, cfg: dict) -> tuple[dict, float, bool]:
     return obs, reward, done
 
 
+TASK_DESCRIPTIONS_PATH = os.path.join("data", "task_descriptions.json")
+
+
 def run_inference(
-    env_key: str = "pusht", output_video_path: str = "inference_output.mp4"
+    env_key: str = "pusht",
+    output_video_path: str = "inference_output.mp4",
+    task_description: str | None = None,
 ) -> None:
     cfg: dict = get_env_config(env_key)
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     logger.info(f"Using device {device}, environment: {env_key}")
+
+    # If no explicit --task, use the first description from the JSON
+    if task_description is None and os.path.exists(TASK_DESCRIPTIONS_PATH):
+        with open(TASK_DESCRIPTIONS_PATH, "r") as f:
+            all_descriptions: dict = json.load(f)
+        descs = all_descriptions.get(env_key, [])
+        if isinstance(descs, list) and descs:
+            task_description = descs[0]
+            logger.info(f"Using description from JSON: {task_description}")
 
     # === Load dataset for normalization stats ===
     dataset = PushTDataset(
@@ -124,18 +143,28 @@ def run_inference(
     stats: dict = dataset.stats
 
     # === Load model ===
-    diff_model = DiffusionPolicy(
-        action_dim=cfg["action_dim"],
-        state_obs_dim=cfg["state_obs_dim"],
-        obs_horizon=cfg["obs_horizon"],
-        diff_step_dim=128,
-        down_dims=[512, 1024, 2048],
-    ).to(device)
-
     checkpoint: dict = torch.load(
         MODEL_LOAD_PATH, map_location=device, weights_only=True
     )
-    diff_model.load_state_dict(checkpoint)
+
+    # Support both new format (dict with model_config) and legacy (bare state_dict)
+    if isinstance(checkpoint, dict) and "model_config" in checkpoint:
+        model_config: dict = checkpoint["model_config"]
+        state_dict: dict = checkpoint["model_state_dict"]
+        logger.info(f"Loaded model config from checkpoint: {model_config}")
+    else:
+        # Legacy checkpoint: no model_config, fall back to env config defaults
+        model_config = {
+            "action_dim": cfg["action_dim"],
+            "state_obs_dim": cfg["state_obs_dim"],
+            "obs_horizon": cfg["obs_horizon"],
+            "diff_step_dim": 128,
+            "down_dims": [512, 1024, 2048],
+        }
+        state_dict = checkpoint
+
+    diff_model = DiffusionPolicy(**model_config).to(device)
+    diff_model.load_state_dict(state_dict)
     diff_model.eval()
     logger.info(f"Loaded checkpoint from {MODEL_LOAD_PATH}")
 
@@ -194,6 +223,11 @@ def run_inference(
             # Reset timesets to initial time to perform diffusion
             noise_scheduler.set_timesteps(cfg["num_diffusion_steps"])
 
+            # Build task description list for language conditioning
+            task_desc: list[str] | None = None
+            if task_description is not None and diff_model.lang_encoder is not None:
+                task_desc = [task_description]
+
             with torch.no_grad():
                 for t in noise_scheduler.timesteps:
                     noise_pred = diff_model(
@@ -201,6 +235,7 @@ def run_inference(
                         torch.full((1,), t, device=device, dtype=torch.long),
                         images,
                         state_obs_seq=states,
+                        task_description=task_desc,
                     )
                     noisy_actions = noise_scheduler.step(
                         noise_pred, t, noisy_actions
@@ -282,7 +317,17 @@ if __name__ == "__main__":
         default="inference_output.mp4",
         help="Path to save output video (default: inference_output.mp4)",
     )
+    parser.add_argument(
+        "--task",
+        type=str,
+        default=None,
+        help="Task description for language-conditioned models",
+    )
     args = parser.parse_args()
     if args.checkpoint:
         MODEL_LOAD_PATH = args.checkpoint
-    run_inference(env_key=args.env, output_video_path=args.output)
+    run_inference(
+        env_key=args.env,
+        output_video_path=args.output,
+        task_description=args.task,
+    )

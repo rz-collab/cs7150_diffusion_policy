@@ -13,6 +13,7 @@ dependencies = [
     "pymunk>=6.6.0,<7.0.0",
     "pyzmq>=26.0.0",
     "tensorboard~=2.20.0",
+    "transformers>=4.40.0",
     "tqdm~=4.67.3",
     "zarr<3.0.0",
 ]

@@ -1,12 +1,18 @@
+# ---
+# Generated: 2026-04-06 | claude-opus-4-6
+# Prompt: Resnet18 visual encoder, copied from Diffusion Policy Colab's Notebook.
+# Modifications:
+#   2026-04-14 | Prompt: Add CLIP vision encoder option | Added CLIPVisualEncoder
+#               that wraps CLIP ViT-B/32 vision model.  Resizes and normalizes
+#               inputs to CLIP's expected format, outputs 512-dim features matching
+#               the ResNet-18 interface.
+# ---
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torchvision
 from typing import Callable
-
-"""
-Resnet18 Visual Encoder.
-Copied from Diffusion Policy Colab's Notebook.
-"""
 
 
 def get_visual_encoder() -> nn.Module:
@@ -87,3 +93,119 @@ def replace_bn_with_gn(
         ),
     )
     return root_module
+
+
+PRETRAINED_VISION_MODELS: dict[str, dict] = {
+    "clip-vit-b-32": {
+        "hf_name": "openai/clip-vit-base-patch32",
+        "family": "clip",
+        "output_dim": 512,
+        "image_size": 224,
+        "mean": [0.48145466, 0.4578275, 0.40821073],
+        "std": [0.26862954, 0.26130258, 0.27577711],
+    },
+    "clip-vit-b-16": {
+        "hf_name": "openai/clip-vit-base-patch16",
+        "family": "clip",
+        "output_dim": 512,
+        "image_size": 224,
+        "mean": [0.48145466, 0.4578275, 0.40821073],
+        "std": [0.26862954, 0.26130258, 0.27577711],
+    },
+    "siglip-base-patch16-224": {
+        "hf_name": "google/siglip-base-patch16-224",
+        "family": "siglip",
+        "output_dim": 768,
+        "image_size": 224,
+        "mean": [0.5, 0.5, 0.5],
+        "std": [0.5, 0.5, 0.5],
+    },
+    "siglip2-base-patch16-224": {
+        "hf_name": "google/siglip2-base-patch16-224",
+        "family": "siglip",
+        "output_dim": 768,
+        "image_size": 224,
+        "mean": [0.5, 0.5, 0.5],
+        "std": [0.5, 0.5, 0.5],
+    },
+}
+
+
+class PretrainedVisualEncoder(nn.Module):
+    """Pretrained vision encoder (CLIP or SigLIP family).
+
+    Handles resizing and model-specific normalization internally, so the
+    caller can pass images in the same [0,1] (H,W) format used by ResNet-18.
+    """
+
+    def __init__(
+        self,
+        model_key: str = "clip-vit-b-32",
+        vision_model: nn.Module | None = None,
+        visual_projection: nn.Module | None = None,
+    ) -> None:
+        """
+        Args:
+            model_key: Key into PRETRAINED_VISION_MODELS for config and
+                       (if vision_model is None) for loading weights.
+            vision_model: Pre-loaded vision backbone. When provided together
+                          with visual_projection, skips loading from HuggingFace.
+            visual_projection: Pre-loaded projection layer.
+        """
+        super().__init__()
+
+        if model_key not in PRETRAINED_VISION_MODELS:
+            available = ", ".join(PRETRAINED_VISION_MODELS.keys())
+            raise ValueError(
+                f"Unknown model_key '{model_key}'. Available: {available}"
+            )
+
+        config = PRETRAINED_VISION_MODELS[model_key]
+        self.output_dim: int = config["output_dim"]
+        self._image_size: int = config["image_size"]
+
+        if vision_model is not None and visual_projection is not None:
+            self.vision_model: nn.Module = vision_model
+            self.visual_projection: nn.Module = visual_projection
+        else:
+            hf_name: str = config["hf_name"]
+            family: str = config["family"]
+
+            if family == "clip":
+                from transformers import CLIPModel
+
+                model = CLIPModel.from_pretrained(hf_name)
+            elif family == "siglip":
+                from transformers import SiglipModel
+
+                model = SiglipModel.from_pretrained(hf_name)
+
+            self.vision_model = model.vision_model
+            self.visual_projection = model.visual_projection
+
+        # Normalization stats the model was pretrained with (move with .to(device))
+        self.register_buffer(
+            "_mean", torch.tensor(config["mean"]).view(1, 3, 1, 1)
+        )
+        self.register_buffer(
+            "_std", torch.tensor(config["std"]).view(1, 3, 1, 1)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (B, 3, H, W) images in [0, 1] range, any spatial size.
+        Returns:
+            (B, output_dim) feature vectors.
+        """
+        sz = self._image_size
+        if x.shape[-2] != sz or x.shape[-1] != sz:
+            x = F.interpolate(
+                x, size=(sz, sz), mode="bilinear", align_corners=False,
+            )
+
+        x = (x - self._mean) / self._std
+
+        vision_out = self.vision_model(pixel_values=x).pooler_output
+        projected: torch.Tensor = self.visual_projection(vision_out)
+        return projected
