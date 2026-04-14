@@ -249,9 +249,6 @@ def run_inference(
                 if done:
                     break
 
-            if done:
-                break
-
     # === Save video ===
     if video_frames:
         imageio.mimwrite(output_video_path, video_frames, fps=15)
