@@ -7,6 +7,9 @@
 #   2026-04-14 | Prompt: Fix numpy version mismatch | Convert action to list before
 #               pickling so numpy 2.x arrays don't reference numpy._core when
 #               unpickled by the numpy 1.x server
+#   2026-04-15 | Prompt: Task selection support | Added get_tasks() to query
+#               available tasks from the server, and optional task_idx param
+#               to reset() so the client can choose which task to load.
 # ---
 
 """
@@ -48,9 +51,25 @@ class RemoteEnv:
             )
         return response
 
-    def reset(self) -> dict:
-        """Reset the remote environment and return the observation dict."""
-        response = self._send({"cmd": "reset"})
+    def get_tasks(self) -> list[dict]:
+        """Query the server for available tasks.
+
+        Returns a list of dicts with keys: idx, name, description.
+        """
+        response = self._send({"cmd": "get_tasks"})
+        return response["tasks"]
+
+    def reset(self, task_idx: int | None = None) -> dict:
+        """Reset the remote environment and return the observation dict.
+
+        Args:
+            task_idx: If provided, load this task before resetting.
+                      If None, reuse the current task (or default to 0).
+        """
+        request: dict = {"cmd": "reset"}
+        if task_idx is not None:
+            request["task_idx"] = task_idx
+        response = self._send(request)
         obs: dict = response["obs"]
         return obs
 

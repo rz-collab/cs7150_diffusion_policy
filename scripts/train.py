@@ -20,6 +20,15 @@
 #               is now only extracted from the batch and passed to forward when the
 #               model has a language encoder, preventing a KeyError and avoiding
 #               unnecessary text processing for resnet_only encoder type.
+#   2026-04-15 | Prompt: Add description support for LIBERO | Refactored
+#               description loading to support both flat lists (PushT) and
+#               per-task dicts (LIBERO). Passes task_descriptions_by_task and
+#               LANG_DROPOUT_PROB to get_libero_dataset so LIBERO samples
+#               return a "description" key with random sampling and dropout.
+#   2026-04-15 | Prompt: Read task_descriptions_path from env config | Replaced
+#               hardcoded TASK_DESCRIPTIONS_PATH and TASK_KEY with
+#               cfg["task_descriptions_path"] and cfg["task_descriptions_key"]
+#               so the path is centralized in env_config.py.
 # ---
 
 import json
@@ -83,8 +92,6 @@ ENCODER_TYPE = "clip_both"
 PRETRAINED_MODEL = "clip-vit-b-32"  # "clip-vit-b-16", "siglip-base-patch16-224", "siglip2-base-patch16-224"
 LANG_PROJ_DIM = 256
 FREEZE_ENCODERS = True  # freeze pretrained vision/language encoder weights
-TASK_DESCRIPTIONS_PATH = os.path.join("data", "task_descriptions.json")
-TASK_KEY = "pusht"  # top-level key in task_descriptions.json
 TASK_SUBTASK: str | None = None  # subtask key for nested configs (e.g. LIBERO)
 LANG_DROPOUT_PROB = 0.1  # probability of dropping language conditioning per batch
 
@@ -108,16 +115,27 @@ if __name__ == "__main__":
     os.makedirs(MODEL_SAVE_DIR, exist_ok=True)
 
     # === Load task descriptions ===
+    # task_descriptions: flat list for single-task envs (PushT)
+    # task_descriptions_by_task: dict mapping task language to description
+    #   paraphrases for multi-task envs (LIBERO)
     task_descriptions: list[str] = []
-    if ENCODER_TYPE != "resnet_only" and os.path.exists(TASK_DESCRIPTIONS_PATH):
-        with open(TASK_DESCRIPTIONS_PATH, "r") as f:
+    task_descriptions_by_task: dict[str, list[str]] | None = None
+    desc_path: str = cfg.get("task_descriptions_path", "")
+    desc_key: str = cfg.get("task_descriptions_key", ENV)
+    if ENCODER_TYPE != "resnet_only" and desc_path and os.path.exists(desc_path):
+        with open(desc_path, "r") as f:
             all_descriptions: dict = json.load(f)
-        entry = all_descriptions.get(TASK_KEY, [])
-        if isinstance(entry, dict) and TASK_SUBTASK is not None:
-            task_descriptions = entry.get(TASK_SUBTASK, [])
+        entry = all_descriptions.get(desc_key, [])
+        if isinstance(entry, dict):
+            if TASK_SUBTASK is not None:
+                task_descriptions = entry.get(TASK_SUBTASK, [])
+            else:
+                # Multi-task: entry maps task language to description lists
+                task_descriptions_by_task = entry if entry else None
         elif isinstance(entry, list):
             task_descriptions = entry
-        logger.info(f"Loaded {len(task_descriptions)} descriptions for {TASK_KEY}")
+        n_descs: int = len(task_descriptions_by_task) if task_descriptions_by_task else len(task_descriptions)
+        logger.info(f"Loaded {n_descs} description entries for {desc_key}")
 
     # === Data ===
     if ENV == "pusht":
@@ -156,6 +174,8 @@ if __name__ == "__main__":
             obs_keys=obs_keys,
             split="train",
             seq_length=cfg["action_pred_horizon"],
+            task_descriptions=task_descriptions_by_task,
+            lang_dropout_prob=LANG_DROPOUT_PROB,
         )
 
     train_dl = DataLoader(

@@ -25,6 +25,12 @@
 #               to LIBERO_CONFIGS and --absolute-actions CLI flag. Passes
 #               control_delta through to ControlEnv so the OSC_POSE controller
 #               can operate in either delta or absolute position mode.
+#   2026-04-15 | Prompt: Client-driven task selection | Server loads the full
+#               task suite on startup. Added "get_tasks" command returning
+#               available tasks with descriptions. "reset" now accepts an
+#               optional task_idx so the client can choose which task to run.
+#               Env is created lazily on first reset and recreated when
+#               task_idx changes.
 # ---
 
 """
@@ -48,10 +54,11 @@ import argparse
 import logging
 import os
 import pickle
+import re
 import signal
 import threading
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import zmq
@@ -78,14 +85,18 @@ LIBERO_CONFIGS: Dict[str, Dict[str, Any]] = {
 }
 
 
-def make_libero_env(env_key: str, control_delta: bool = True):
-    """Create a LIBERO OffScreenRenderEnv for the given config key."""
-    from libero.libero import benchmark, get_libero_path
+def get_task_description(task_name: str) -> str:
+    """Extract natural language description from a LIBERO task name."""
+    name = re.sub(r"_demo$", "", task_name)
+    name = re.sub(r"^[A-Z_]+SCENE\d+_", "", name)
+    return name.replace("_", " ")
+
+
+def make_libero_env(task, cfg: Dict[str, Any], control_delta: bool = True):
+    """Create a LIBERO OffScreenRenderEnv for a specific task object."""
+    from libero.libero import get_libero_path
     from libero.libero.envs import OffScreenRenderEnv
 
-    cfg = LIBERO_CONFIGS[env_key]
-    task_suite = benchmark.get_benchmark_dict()[cfg["env_name"]]()
-    task = task_suite.get_task(0)
     bddl_file: str = os.path.join(
         get_libero_path("bddl_files"), task.problem_folder, task.bddl_file
     )
@@ -190,13 +201,23 @@ def handle_render(last_obs: Optional[dict], image_key: str) -> Dict[str, Any]:
 
 
 def run_session(
-    env,
     socket: zmq.Socket,
+    tasks: List[Dict[str, Any]],
+    cfg: Dict[str, Any],
+    control_delta: bool,
     image_key: str,
     record: bool,
     shutdown: threading.Event,
-) -> bool:
-    """Run a single client session. Returns True if the server should continue."""
+) -> Tuple[bool, List[dict]]:
+    """Run a single client session.
+
+    The environment is created lazily when the client sends a "reset" with
+    a task_idx, and recreated if the task_idx changes.
+
+    Returns (should_continue, obs_history).
+    """
+    env = None
+    current_task_idx: Optional[int] = None
     last_obs: Optional[dict] = None
     obs_history: List[dict] = []
 
@@ -208,23 +229,63 @@ def run_session(
         request: Dict[str, Any] = pickle.loads(raw)
         cmd: str = request.get("cmd", "")
 
-        if cmd == "reset":
+        if cmd == "get_tasks":
+            task_info = [
+                {"idx": t["idx"], "name": t["name"], "description": t["description"]}
+                for t in tasks
+            ]
+            response = {"status": "ok", "tasks": task_info}
+
+        elif cmd == "reset":
+            task_idx: int = request.get(
+                "task_idx",
+                current_task_idx if current_task_idx is not None else 0,
+            )
+            if task_idx < 0 or task_idx >= len(tasks):
+                response = {
+                    "status": "error",
+                    "message": f"Invalid task_idx {task_idx}. "
+                    f"Must be 0–{len(tasks) - 1}.",
+                }
+                socket.send(pickle.dumps(response))
+                continue
+
+            # Create or recreate the env when the task changes
+            if env is None or task_idx != current_task_idx:
+                if env is not None:
+                    close_env(env)
+                logger.info(
+                    f"Loading task {task_idx}: {tasks[task_idx]['description']}"
+                )
+                env = make_libero_env(
+                    tasks[task_idx]["task"], cfg, control_delta
+                )
+                current_task_idx = task_idx
+
             response = handle_reset(env)
             last_obs = response.get("obs")
             if record and last_obs is not None:
                 obs_history.append(last_obs)
 
         elif cmd == "step":
-            action = np.array(request["action"], dtype=np.float32)
-            response = handle_step(env, action)
-            last_obs = response.get("obs")
-            if record and last_obs is not None:
-                obs_history.append(last_obs)
+            if env is None:
+                response = {
+                    "status": "error",
+                    "message": "No env loaded. Send reset first.",
+                }
+            else:
+                action = np.array(request["action"], dtype=np.float32)
+                response = handle_step(env, action)
+                last_obs = response.get("obs")
+                if record and last_obs is not None:
+                    obs_history.append(last_obs)
 
         elif cmd == "render":
             response = handle_render(last_obs, image_key)
 
         elif cmd == "close":
+            if env is not None:
+                close_env(env)
             socket.send(pickle.dumps({"status": "ok"}))
             return True, obs_history
 
@@ -236,6 +297,9 @@ def run_session(
 
         socket.send(pickle.dumps(response))
 
+    # Clean up on shutdown
+    if env is not None:
+        close_env(env)
     return False, obs_history
 
 
@@ -246,6 +310,25 @@ def run_server(env_key: str, port: int, record: bool, video_dir: str, camera_key
     action_mode: str = "delta" if control_delta else "absolute"
     logger.info(f"Action mode: {action_mode}")
 
+    # Load task suite once at startup
+    from libero.libero import benchmark
+
+    task_suite = benchmark.get_benchmark_dict()[cfg["env_name"]]()
+    num_tasks: int = task_suite.n_tasks
+    tasks: List[Dict[str, Any]] = []
+    for i in range(num_tasks):
+        task = task_suite.get_task(i)
+        tasks.append({
+            "idx": i,
+            "name": task.name,
+            "description": get_task_description(task.name),
+            "task": task,
+        })
+    logger.info(f"Loaded {num_tasks} tasks from {cfg['env_name']}:")
+    for t in tasks:
+        logger.info(f"  [{t['idx']}] {t['description']}")
+
+    # ZMQ setup
     context: zmq.Context = zmq.Context()
     socket: zmq.Socket = context.socket(zmq.REP)
     address: str = f"tcp://*:{port}"
@@ -263,22 +346,22 @@ def run_server(env_key: str, port: int, record: bool, video_dir: str, camera_key
     signal.signal(signal.SIGTERM, _signal_handler)
 
     session_num: int = 0
-    env = None
 
     while not shutdown.is_set():
-        # Create or recreate the environment for each session
         session_num += 1
-        logger.info(f"Session {session_num}: creating LIBERO environment ({env_key})")
-        env = make_libero_env(env_key, control_delta=control_delta)
-        logger.info(f"Session {session_num}: environment ready, waiting for client")
+        logger.info(f"Session {session_num}: waiting for client")
 
         try:
-            should_continue, obs_history = run_session(env, socket, image_key, record, shutdown)
+            should_continue, obs_history = run_session(
+                socket, tasks, cfg, control_delta,
+                image_key, record, shutdown,
+            )
         except zmq.ZMQError as e:
             if e.errno == zmq.ETERM:
                 break
             logger.error(f"ZMQ error: {e}")
             should_continue = False
+            obs_history = []
         except Exception as e:
             logger.error(f"Session error: {e}", exc_info=True)
             try:
@@ -292,17 +375,12 @@ def run_server(env_key: str, port: int, record: bool, video_dir: str, camera_key
         if record and obs_history:
             save_video(obs_history, video_dir, env_key, camera_keys)
 
-        # Clean up the environment before next session
-        close_env(env)
-        env = None
         logger.info(f"Session {session_num}: ended")
 
         if not should_continue:
             break
 
     logger.info("Shutting down server")
-    if env is not None:
-        close_env(env)
     socket.close()
     context.term()
 

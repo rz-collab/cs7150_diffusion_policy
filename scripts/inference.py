@@ -48,6 +48,14 @@
 #               pygame window and automatic video save with --display and
 #               --save-video flags. Neither runs by default; pygame and imageio
 #               are now conditional imports.
+#   2026-04-15 | Prompt: Client-driven task selection | For LIBERO, queries
+#               available tasks from the server via get_tasks and selects one
+#               (random or via --task-idx). Task description auto-populated
+#               from the server for language conditioning.
+#   2026-04-15 | Prompt: Read task_descriptions_path from env config | Replaced
+#               hardcoded TASK_DESCRIPTIONS_PATH with cfg["task_descriptions_path"]
+#               and cfg["task_descriptions_key"] so the path is centralized in
+#               env_config.py.
 # ---
 
 # TODO: Review the code generated and make sure it works properly
@@ -166,29 +174,16 @@ def env_step(env, action: np.ndarray, cfg: dict) -> tuple[dict, float, bool]:
     return obs, reward, done
 
 
-TASK_DESCRIPTIONS_PATH = os.path.join("data", "task_descriptions.json")
-
-
 def run_inference(
     env_key: str = "pusht",
     output_video_path: str | None = None,
     task_description: str | None = None,
+    task_idx: int | None = None,
     display: bool = False,
 ) -> None:
     cfg: dict = get_env_config(env_key)
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     logger.info(f"Using device {device}, environment: {env_key}")
-
-    # If no explicit --task, randomly select a description from the JSON
-    if task_description is None and os.path.exists(TASK_DESCRIPTIONS_PATH):
-        with open(TASK_DESCRIPTIONS_PATH, "r") as f:
-            all_descriptions: dict = json.load(f)
-        descs = all_descriptions.get(env_key, [])
-        if isinstance(descs, list) and descs:
-            task_description = random.choice(descs)
-
-    if task_description is not None:
-        logger.info(f"Task description: {task_description}")
 
     # === Load model (before stats so shape errors surface quickly) ===
     checkpoint: dict = torch.load(
@@ -256,7 +251,36 @@ def run_inference(
 
     # === Environment ===
     env = make_env(cfg)
-    obs: dict = env_reset(env, cfg)
+
+    # For LIBERO, query available tasks from the server and select one.
+    # The task description is used for language-conditioned models.
+    if env_key == "libero":
+        available_tasks: list[dict] = env.get_tasks()
+        if task_idx is not None:
+            selected = available_tasks[task_idx]
+        else:
+            selected = random.choice(available_tasks)
+            task_idx = selected["idx"]
+        if task_description is None:
+            task_description = selected["description"]
+        logger.info(
+            f"Task {task_idx}: {task_description}"
+        )
+        obs: dict = env.reset(task_idx=task_idx)
+    else:
+        # PushT: pick a random description from the JSON file
+        desc_path: str = cfg.get("task_descriptions_path", "")
+        desc_key: str = cfg.get("task_descriptions_key", env_key)
+        if task_description is None and desc_path and os.path.exists(desc_path):
+            with open(desc_path, "r") as f:
+                all_descriptions: dict = json.load(f)
+            descs = all_descriptions.get(desc_key, [])
+            if isinstance(descs, list) and descs:
+                task_description = random.choice(descs)
+        obs = env_reset(env, cfg)
+
+    if task_description is not None:
+        logger.info(f"Task description: {task_description}")
 
     save_video: bool = output_video_path is not None
     screen = None
@@ -437,6 +461,13 @@ if __name__ == "__main__":
         default=None,
         help="Task description for language-conditioned models",
     )
+    parser.add_argument(
+        "--task-idx",
+        type=int,
+        default=None,
+        help="LIBERO task index to run (random if omitted). "
+        "Use get_tasks on the server to see available indices.",
+    )
     args = parser.parse_args()
     if args.checkpoint:
         MODEL_LOAD_PATH = args.checkpoint
@@ -444,5 +475,6 @@ if __name__ == "__main__":
         env_key=args.env,
         output_video_path=args.save_video,
         task_description=args.task,
+        task_idx=args.task_idx,
         display=args.display,
     )
