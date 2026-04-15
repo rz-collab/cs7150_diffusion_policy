@@ -34,6 +34,20 @@
 #   2026-04-14 | Prompt: Random fallback description | Changed fallback
 #               task description selection from first entry to random.choice.
 #               Added log line showing which description is being used.
+#   2026-04-15 | Prompt: Add LIBERO inference support | Branched stats loading
+#               (HDF5 via compute_stats_from_hdf5 for LIBERO, zarr PushTDataset
+#               for PushT), observation preprocessing (per-key state normalization
+#               and image /255 for LIBERO), noise tensor dims from model_config,
+#               and action denormalization (10D rot-6d model output to 7D
+#               axis-angle env actions via denormalize_actions_libero).
+#   2026-04-15 | Prompt: Fix LIBERO model loading | Override model_config
+#               action_dim (7→10) and state_obs_dim to match the 6D rotation
+#               representation training uses. Reordered model loading before
+#               stats loading so shape errors surface before the slow HDF5 scan.
+#   2026-04-15 | Prompt: Make display and video optional | Replaced always-on
+#               pygame window and automatic video save with --display and
+#               --save-video flags. Neither runs by default; pygame and imageio
+#               are now conditional imports.
 # ---
 
 # TODO: Review the code generated and make sure it works properly
@@ -48,14 +62,8 @@ import logging
 from collections import deque
 from tqdm import tqdm
 from diffusers import DDPMScheduler
-import pygame
-import imageio
 from diffusion_policy.model.diffusion_policy import DiffusionPolicy
-from diffusion_policy.dataset.pusht import (
-    PushTDataset,
-    unnormalize_data,
-    normalize_data,
-)
+from diffusion_policy.util.normalization import unnormalize_data, normalize_data
 from diffusion_policy.env_config import get_env_config
 
 logging.basicConfig(
@@ -70,6 +78,48 @@ def extract_state(obs: dict[str, np.ndarray], state_keys: list[str]) -> np.ndarr
     """Extract and concatenate state values from observation dict."""
     parts: list[np.ndarray] = [np.asarray(obs[k]).flatten() for k in state_keys]
     return np.concatenate(parts)
+
+
+def preprocess_state_libero(obs: dict, stats: dict) -> np.ndarray:
+    """Normalize LIBERO observation state to match training preprocessing.
+
+    Training normalizes ee_pos and gripper with min-max, and converts
+    axis-angle orientation to quaternion.  The env already provides
+    quaternion orientation (robot0_eef_quat), so it is used directly.
+    """
+    ee_pos: np.ndarray = normalize_data(
+        np.asarray(obs["robot0_eef_pos"]).flatten(), stats["obs"]["ee_pos"]
+    )
+    ee_quat: np.ndarray = np.asarray(obs["robot0_eef_quat"]).flatten()
+    gripper: np.ndarray = normalize_data(
+        np.asarray(obs["robot0_gripper_qpos"]).flatten(),
+        stats["obs"]["gripper_states"],
+    )
+    return np.concatenate([ee_pos, ee_quat, gripper])
+
+
+def denormalize_actions_libero(
+    pred_actions: torch.Tensor, stats: dict
+) -> np.ndarray:
+    """Convert 10D model output back to 7D LIBERO env actions.
+
+    Model outputs: [pos_norm(3), rot_6d(6), gripper_norm(1)]
+    Env expects:   [pos(3), axis_angle(3), gripper(1)]
+    """
+    import diffusion_policy.util.rotation as RotationUtils
+
+    pos_np: np.ndarray = unnormalize_data(
+        pred_actions[..., :3].numpy(), stats["actions"]["ee_pos"]
+    )
+    gripper_np: np.ndarray = unnormalize_data(
+        pred_actions[..., 9:].numpy(), stats["actions"]["gripper_states"]
+    )
+
+    rot_6d = pred_actions[..., 3:9]
+    rot_matrix = RotationUtils.rotation_6d_to_matrix(rot_6d)
+    rot_aa_np: np.ndarray = RotationUtils.matrix_to_axis_angle(rot_matrix).numpy()
+
+    return np.concatenate([pos_np, rot_aa_np, gripper_np], axis=-1)
 
 
 def make_env(cfg: dict):
@@ -121,8 +171,9 @@ TASK_DESCRIPTIONS_PATH = os.path.join("data", "task_descriptions.json")
 
 def run_inference(
     env_key: str = "pusht",
-    output_video_path: str = "inference_output.mp4",
+    output_video_path: str | None = None,
     task_description: str | None = None,
+    display: bool = False,
 ) -> None:
     cfg: dict = get_env_config(env_key)
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -139,16 +190,7 @@ def run_inference(
     if task_description is not None:
         logger.info(f"Task description: {task_description}")
 
-    # === Load dataset for normalization stats ===
-    dataset = PushTDataset(
-        dataset_path=cfg["dataset_path"],
-        pred_horizon=cfg["action_pred_horizon"],
-        obs_horizon=cfg["obs_horizon"],
-        action_horizon=cfg["action_exec_horizon"],
-    )
-    stats: dict = dataset.stats
-
-    # === Load model ===
+    # === Load model (before stats so shape errors surface quickly) ===
     checkpoint: dict = torch.load(
         MODEL_LOAD_PATH, map_location=device, weights_only=True
     )
@@ -169,10 +211,39 @@ def run_inference(
         }
         state_dict = checkpoint
 
+    # LIBERO training overrides action/state dims for the 6D rotation
+    # representation (Zhou et al.).  The checkpoint's model_config may
+    # still contain the raw env values, so apply the same overrides here.
+    if env_key == "libero":
+        model_config["action_dim"] = 3 + 6 + 1   # pos + rot_6d + gripper
+        model_config["state_obs_dim"] = 3 + 4 + 2  # ee_pos + quat + gripper
+
     diff_model = DiffusionPolicy(**model_config).to(device)
     diff_model.load_state_dict(state_dict)
     diff_model.eval()
     logger.info(f"Loaded checkpoint from {MODEL_LOAD_PATH}")
+
+    # === Load normalization stats ===
+    if env_key == "libero":
+        from diffusion_policy.dataset.libero import (
+            compute_stats_from_hdf5,
+            get_hdf5_files_from_folders,
+        )
+
+        hdf5_files = get_hdf5_files_from_folders(cfg["dataset_path"])
+        stats: dict = compute_stats_from_hdf5(
+            hdf5_files, ["ee_pos", "ee_ori", "gripper_states"]
+        )
+    else:
+        from diffusion_policy.dataset.pusht import PushTDataset
+
+        dataset = PushTDataset(
+            dataset_path=cfg["dataset_path"],
+            pred_horizon=cfg["action_pred_horizon"],
+            obs_horizon=cfg["obs_horizon"],
+            action_horizon=cfg["action_exec_horizon"],
+        )
+        stats = dataset.stats
 
     # === Noise scheduler ===
     # Matches the code they have in their notebook
@@ -187,17 +258,25 @@ def run_inference(
     env = make_env(cfg)
     obs: dict = env_reset(env, cfg)
 
+    save_video: bool = output_video_path is not None
+    screen = None
     vis_size: int = cfg.get("vis_size", 512)
-    pygame.init()
-    pygame.display.set_caption("Diffusion Policy Inference")
-    screen = pygame.display.set_mode((vis_size, vis_size))
+    if display:
+        import pygame
+
+        pygame.init()
+        pygame.display.set_caption("Diffusion Policy Inference")
+        screen = pygame.display.set_mode((vis_size, vis_size))
 
     obs_images = deque(maxlen=cfg["obs_horizon"])
     obs_states = deque(maxlen=cfg["obs_horizon"])
 
     # Seed the observation buffer by repeating the first observation
     img: np.ndarray = obs[cfg["image_key"]]
-    state: np.ndarray = extract_state(obs, cfg["state_keys"])
+    if env_key == "libero":
+        state: np.ndarray = preprocess_state_libero(obs, stats)
+    else:
+        state = extract_state(obs, cfg["state_keys"])
     for _ in range(cfg["obs_horizon"]):
         obs_images.append(img)
         obs_states.append(state)
@@ -214,16 +293,22 @@ def run_inference(
             # === Build observation tensors ===
             images_np = np.stack(obs_images)  # (obs_h, H, W, 3)
             images_np = np.moveaxis(images_np, -1, 1)  # (obs_h, 3, H, W)
+            if env_key == "libero":
+                images_np = images_np / 255.0
             images = torch.from_numpy(images_np).float().unsqueeze(0).to(device)
 
+            # LIBERO states are already normalized in preprocess_state_libero;
+            # PushT states need min-max normalization here.
             states_np = np.stack(obs_states)  # (obs_h, state_dim)
-            nstates: np.ndarray = normalize_data(states_np, stats["agent_pos"])
-            states = torch.from_numpy(nstates).float().unsqueeze(0).to(device)
+            if env_key != "libero":
+                states_np = normalize_data(states_np, stats["agent_pos"])
+            states = torch.from_numpy(states_np).float().unsqueeze(0).to(device)
 
             # === DDPM denoising loop ===
             # 1 is used for the first since the "batch size" is 1
             noisy_actions = torch.randn(
-                (1, cfg["action_pred_horizon"], cfg["action_dim"]), device=device
+                (1, cfg["action_pred_horizon"], model_config["action_dim"]),
+                device=device,
             )
 
             # Reset timesets to initial time to perform diffusion
@@ -248,8 +333,13 @@ def run_inference(
                     ).prev_sample
 
             # === Denormalize predicted actions ===
-            pred_actions = noisy_actions.detach().to("cpu").numpy()[0]
-            pred_actions = unnormalize_data(pred_actions, stats["action"])
+            if env_key == "libero":
+                pred_actions = denormalize_actions_libero(
+                    noisy_actions.detach().cpu()[0], stats
+                )
+            else:
+                pred_actions = noisy_actions.detach().cpu().numpy()[0]
+                pred_actions = unnormalize_data(pred_actions, stats["action"])
 
             # Only take action horrizon number of actions
             start = cfg["action_exec_horizon"] - 1
@@ -264,21 +354,30 @@ def run_inference(
                 rewards.append(reward)
                 # Save observation images and state
                 obs_images.append(obs[cfg["image_key"]])
-                obs_states.append(extract_state(obs, cfg["state_keys"]))
+                if env_key == "libero":
+                    obs_states.append(preprocess_state_libero(obs, stats))
+                else:
+                    obs_states.append(extract_state(obs, cfg["state_keys"]))
 
-                # Render frame to pygame display
-                render_img: np.ndarray = env.render()
-                if render_img is not None:
-                    # Capture frame for video output
-                    video_frames.append(render_img)
-                    surf = pygame.surfarray.make_surface(
-                        np.transpose(render_img, (1, 0, 2))
-                    )
-                    screen.blit(
-                        pygame.transform.scale(surf, (vis_size, vis_size)), (0, 0)
-                    )
-                    pygame.display.flip()
-                pygame.event.pump()
+                # Render frame for display / video
+                if display or save_video:
+                    render_img: np.ndarray = env.render()
+                    if render_img is not None:
+                        if save_video:
+                            video_frames.append(render_img)
+                        if display and screen is not None:
+                            surf = pygame.surfarray.make_surface(
+                                np.transpose(render_img, (1, 0, 2))
+                            )
+                            screen.blit(
+                                pygame.transform.scale(
+                                    surf, (vis_size, vis_size)
+                                ),
+                                (0, 0),
+                            )
+                            pygame.display.flip()
+                if display:
+                    pygame.event.pump()
 
                 # Update step index and progress bar
                 step_idx += 1
@@ -292,12 +391,15 @@ def run_inference(
                     break
 
     # === Save video ===
-    if video_frames:
+    if save_video and video_frames:
+        import imageio
+
         imageio.mimwrite(output_video_path, video_frames, fps=15)
         logger.info(f"Saved video ({len(video_frames)} frames) to {output_video_path}")
 
     env.close()
-    pygame.quit()
+    if display:
+        pygame.quit()
     logger.info(f"Total steps: {step_idx}, Total reward: {sum(rewards):.2f}")
     if rewards:
         logger.info(f"Max reward: {max(rewards):.3f}")
@@ -318,10 +420,16 @@ if __name__ == "__main__":
         help="Path to model checkpoint (overrides default)",
     )
     parser.add_argument(
-        "--output",
+        "--save-video",
         type=str,
-        default="inference_output.mp4",
-        help="Path to save output video (default: inference_output.mp4)",
+        default=None,
+        metavar="PATH",
+        help="Save output video to PATH (e.g. --save-video out.mp4)",
+    )
+    parser.add_argument(
+        "--display",
+        action="store_true",
+        help="Show a live pygame window during inference",
     )
     parser.add_argument(
         "--task",
@@ -334,6 +442,7 @@ if __name__ == "__main__":
         MODEL_LOAD_PATH = args.checkpoint
     run_inference(
         env_key=args.env,
-        output_video_path=args.output,
+        output_video_path=args.save_video,
         task_description=args.task,
+        display=args.display,
     )
