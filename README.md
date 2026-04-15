@@ -1,7 +1,4 @@
 
-
-
-
 ## Installation
 
 We will have two virtual environments, one for diffusion policy and one for LIBERO benchmarks, due to dependencies conflicts.
@@ -40,7 +37,13 @@ python scripts/download_pusht_dataset.py
 ```
 
 Download LIBERO datasets into `data/libero` folder: \
-You can download them manually from `https://libero-project.github.io/datasets` or using their provided script (requires using `libero` conda environment), which downloads to `libero/datasets`
+You can download them manually from `https://libero-project.github.io/datasets` or using their provided script (requires using `libero` conda environment), which downloads to `libero/datasets`.  Move them to `data/libero`.
+
+To make diffusion policy use actions = position control instead of velocity, must run this script.  This takes unfortunately 2 minute per task, and we have 130 tasks... This script is adapted from https://github.com/2toinf/X-VLA/blob/main/evaluation/libero/rel2abs.py, you can see explanation here: https://github.com/2toinf/X-VLA/blob/main/evaluation/libero/preprocess.md
+```bash
+conda activate libero
+python scripts/rel2abs.py --input_dir data/libero/libero_10
+```
 
 Train
 ```bash
@@ -52,9 +55,13 @@ Visualize train loss via tensorboard
 tensorboard --logdir runs/
 ```
 
+
+
+
 ## Libero Dataset Notes
 - They use `Panda` robot model that has 7 revolution joints (`joint_states` dimension is 7) and a gripper of 2 DoF (fingers positions but they're symmetric, so in action space it's just one dimension).
 The action dimension is 7: (px,py,pz,rx,ry,rz,gripper) and they're relative pose command (called `OSC_POSE` controller type in robosuite)
+
 
 
 
