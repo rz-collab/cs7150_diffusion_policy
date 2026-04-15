@@ -7,6 +7,9 @@
 #   2026-04-14 | Prompt: Add ZMQ socket support for LIBERO | Added zmq_address field
 #               to LIBERO configs so inference connects to the remote env server
 #               instead of importing libero directly
+#   2026-04-14 | Prompt: Make control_delta a changeable setting | Added control_delta
+#               field to LIBERO configs (default True) so users can switch between
+#               delta and absolute position action modes
 # ---
 
 # NOTE: This is a temporary file to integrate the two different environments frameworks.
@@ -46,6 +49,8 @@ ENV_CONFIGS = {
         "action_pred_horizon": 16,
         "num_diffusion_steps": 100,
         "max_steps": 300,
+        # True = actions are deltas from current pose; False = absolute target poses
+        "control_delta": True,
     },
 }
 

@@ -21,6 +21,10 @@
 #               select which camera views to include in the saved video. Multiple
 #               cameras are rendered side-by-side. Use --video-cameras both for
 #               agentview + eye-in-hand.
+#   2026-04-14 | Prompt: Make control_delta a changeable setting | Added control_delta
+#               to LIBERO_CONFIGS and --absolute-actions CLI flag. Passes
+#               control_delta through to ControlEnv so the OSC_POSE controller
+#               can operate in either delta or absolute position mode.
 # ---
 
 """
@@ -69,11 +73,12 @@ LIBERO_CONFIGS: Dict[str, Dict[str, Any]] = {
         "env_name": "libero_spatial",
         "image_size": 128,
         "image_key": "agentview_image",
+        "control_delta": True,
     },
 }
 
 
-def make_libero_env(env_key: str):
+def make_libero_env(env_key: str, control_delta: bool = True):
     """Create a LIBERO OffScreenRenderEnv for the given config key."""
     from libero.libero import benchmark, get_libero_path
     from libero.libero.envs import OffScreenRenderEnv
@@ -88,6 +93,7 @@ def make_libero_env(env_key: str):
         bddl_file_name=bddl_file,
         camera_heights=cfg["image_size"],
         camera_widths=cfg["image_size"],
+        control_delta=control_delta,
     )
 
 
@@ -233,10 +239,12 @@ def run_session(
     return False, obs_history
 
 
-def run_server(env_key: str, port: int, record: bool, video_dir: str, camera_keys: List[str]) -> None:
+def run_server(env_key: str, port: int, record: bool, video_dir: str, camera_keys: List[str], control_delta: bool = True) -> None:
     """Start the ZMQ REP server and serve environment sessions in a loop."""
     cfg = LIBERO_CONFIGS[env_key]
     image_key: str = cfg.get("image_key", "agentview_image")
+    action_mode: str = "delta" if control_delta else "absolute"
+    logger.info(f"Action mode: {action_mode}")
 
     context: zmq.Context = zmq.Context()
     socket: zmq.Socket = context.socket(zmq.REP)
@@ -261,7 +269,7 @@ def run_server(env_key: str, port: int, record: bool, video_dir: str, camera_key
         # Create or recreate the environment for each session
         session_num += 1
         logger.info(f"Session {session_num}: creating LIBERO environment ({env_key})")
-        env = make_libero_env(env_key)
+        env = make_libero_env(env_key, control_delta=control_delta)
         logger.info(f"Session {session_num}: environment ready, waiting for client")
 
         try:
@@ -334,6 +342,12 @@ if __name__ == "__main__":
              "(default: agentview_image). "
              "Use 'both' for agentview_image + robot0_eye_in_hand_image.",
     )
+    parser.add_argument(
+        "--absolute-actions",
+        action="store_true",
+        help="Use absolute target poses instead of delta actions "
+             "(sets control_delta=False on the OSC_POSE controller)",
+    )
     args = parser.parse_args()
 
     # Shorthand: --video-cameras both
@@ -346,4 +360,5 @@ if __name__ == "__main__":
         record=args.save_video,
         video_dir=args.video_dir,
         camera_keys=args.video_cameras,
+        control_delta=not args.absolute_actions,
     )

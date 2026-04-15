@@ -16,6 +16,10 @@
 #   2026-04-14 | Prompt: Move lang dropout to dataset | Removed batch-level
 #               language dropout from training loop; per-sample dropout is now
 #               handled in PushTDataset.  Removed unused random import.
+#   2026-04-14 | Prompt: Fix text encoder loading for resnet_only | task_description
+#               is now only extracted from the batch and passed to forward when the
+#               model has a language encoder, preventing a KeyError and avoiding
+#               unnecessary text processing for resnet_only encoder type.
 # ---
 
 import json
@@ -60,7 +64,7 @@ STATE_OBS_DIM = 2
 # "clip_text"       — ResNet-18 vision + pretrained text encoder
 # "clip_both"       — Pretrained vision + pretrained text encoder
 # "resnet_and_text" — ResNet-18 vision + standalone text encoder
-ENCODER_TYPE = "resnet_and_text"
+ENCODER_TYPE = "clip_both"
 PRETRAINED_MODEL = "clip-vit-b-32"  # "clip-vit-b-16", "siglip-base-patch16-224", "siglip2-base-patch16-224"
 LANG_PROJ_DIM = 256
 FREEZE_ENCODERS = True  # freeze pretrained vision/language encoder weights
@@ -73,7 +77,7 @@ LANG_DROPOUT_PROB = 0.1  # probability of dropping language conditioning per bat
 WEIGHT_DECAY = 1e-6
 LR = 1e-4
 BATCH_SIZE = 64
-NUM_EPOCHS = 50
+NUM_EPOCHS = 100
 GRAD_CLIP_NORM = 1.0
 NUM_WARMUP_STEPS = 500
 
@@ -208,12 +212,17 @@ if __name__ == "__main__":
                 )
 
                 # 4. Compute noise residual as loss
+                task_desc: list[str] | None = (
+                    list(train_batch["description"])
+                    if diff_model.lang_encoder is not None
+                    else None
+                )
                 pred_noises = diff_model(
                     noisy_actions,
                     diff_steps,
                     imgs,
                     state_obs_seq=states,
-                    task_description=list(train_batch["description"]),
+                    task_description=task_desc,
                 )
 
                 loss = loss_fn(pred_noises, noises)

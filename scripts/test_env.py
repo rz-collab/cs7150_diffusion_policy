@@ -3,6 +3,17 @@
 # Prompt: Test script that connects to an environment and runs random actions
 #         to verify the env setup (including ZMQ bridge for LIBERO) works.
 # Modifications:
+#   2026-04-14 | Prompt: Change LIBERO actions to cover entire area | Replaced random
+#               actions for LIBERO with a systematic sweep that moves the end-effector
+#               through a grid of positions across the workspace, holding orientation
+#               and gripper steady, so the test exercises the full reachable area.
+#   2026-04-14 | Prompt: Cover all rotation angles too | Extended the LIBERO sweep to
+#               also rotate through ±rx, ±ry, ±rz (action dims 3-5) after the
+#               position sweep, so the test covers all 6 DOF of the action space.
+#   2026-04-14 | Prompt: Fix sweep to cover negative directions | Changed sweep to go
+#               negative first for N steps, then positive for 2N steps per axis, so the
+#               arm traverses from negative extreme through start to positive extreme
+#               instead of just going out and back to start.
 # ---
 
 """
@@ -95,12 +106,44 @@ def run_test(env_key: str, num_steps: int) -> None:
         assert sk in obs, f"Expected state key '{sk}' not in obs: {list(obs.keys())}"
     logger.info("All expected observation keys present")
 
-    # --- Step with random actions ---
+    # --- Step with actions ---
     action_dim: int = cfg["action_dim"]
     rewards: list[float] = []
 
+    # For LIBERO, generate a sweep pattern that covers the full workspace.
+    # The 7D action is [dx, dy, dz, drx, dry, drz, gripper].
+    # The OSC_POSE controller scales position inputs (±1) to ±0.05m and
+    # orientation inputs to ±0.5rad per step.
+    #
+    # For each of the 6 DOF we sweep negative for N steps (reaching the
+    # negative extreme), then positive for 2N steps (passing through the
+    # start all the way to the positive extreme).  This gives 3 phases
+    # per axis × 6 axes = 18 phases total.
+    if env_key.startswith("libero"):
+        num_phases: int = 18  # 3 phases per axis × 6 axes
+        steps_per_phase: int = max(1, num_steps // num_phases)
+        sweep_actions: list[np.ndarray] = []
+        for axis in range(6):
+            neg_vec = np.zeros(action_dim, dtype=np.float32)
+            neg_vec[axis] = -1.0
+            pos_vec = np.zeros(action_dim, dtype=np.float32)
+            pos_vec[axis] = 1.0
+            # Phase 1: go negative from start to negative extreme
+            sweep_actions.extend([neg_vec] * steps_per_phase)
+            # Phase 2-3: go positive for 2x steps to reach positive extreme
+            sweep_actions.extend([pos_vec] * (steps_per_phase * 2))
+        # Pad or trim to exactly num_steps
+        while len(sweep_actions) < num_steps:
+            sweep_actions.append(np.zeros(action_dim, dtype=np.float32))
+        sweep_actions = sweep_actions[:num_steps]
+    else:
+        sweep_actions = None
+
     for step in range(num_steps):
-        action = np.random.uniform(-1.0, 1.0, size=(action_dim,)).astype(np.float32)
+        if sweep_actions is not None:
+            action = sweep_actions[step]
+        else:
+            action = np.random.uniform(-1.0, 1.0, size=(action_dim,)).astype(np.float32)
         obs, reward, done = env_step(env, action, cfg)
         rewards.append(reward)
 
