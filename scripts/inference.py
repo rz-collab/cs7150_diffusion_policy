@@ -41,6 +41,8 @@ import imageio
 from diffusion_policy.model.diffusion_policy import DiffusionPolicy
 from diffusion_policy.dataset.pusht import (
     PushTDataset,
+)
+from diffusion_policy.util.normalization import (
     unnormalize_data,
     normalize_data,
 )
@@ -207,10 +209,10 @@ def run_inference(
 
             # === Denormalize predicted actions ===
             pred_actions = noisy_actions.detach().to("cpu").numpy()[0]
-            pred_actions = unnormalize_data(pred_actions, stats["action"])
+            pred_actions = unnormalize_data(pred_actions, stats["actions"])
 
             # Only take action horrizon number of actions
-            start = cfg["action_exec_horizon"] - 1
+            start = cfg["obs_horizon"] - 1
             end = start + cfg["action_exec_horizon"]
             action = pred_actions[start:end, :]
 
