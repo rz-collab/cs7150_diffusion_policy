@@ -29,6 +29,10 @@
 #               hardcoded TASK_DESCRIPTIONS_PATH and TASK_KEY with
 #               cfg["task_descriptions_path"] and cfg["task_descriptions_key"]
 #               so the path is centralized in env_config.py.
+#   2026-04-15 | Prompt: tqdm-safe logging and description debug log | Added
+#               TqdmLoggingHandler so logger.info doesn't break progress bars.
+#               Log sample descriptions from the first batch to verify they
+#               reach the model.
 # ---
 
 import json
@@ -52,8 +56,16 @@ import time
 from datetime import datetime
 import argparse
 
+class TqdmLoggingHandler(logging.StreamHandler):
+    """Routes log output through tqdm.write so progress bars aren't broken."""
+    def emit(self, record: logging.LogRecord) -> None:
+        msg: str = self.format(record)
+        tqdm.write(msg)
+
 logging.basicConfig(
-    level=logging.INFO, format="[%(asctime)s] [%(levelname)s] %(message)s"
+    level=logging.INFO,
+    format="[%(asctime)s] [%(levelname)s] %(message)s",
+    handlers=[TqdmLoggingHandler()],
 )
 logger = logging.getLogger(__name__)
 
@@ -93,7 +105,7 @@ PRETRAINED_MODEL = "clip-vit-b-32"  # "clip-vit-b-16", "siglip-base-patch16-224"
 LANG_PROJ_DIM = 256
 FREEZE_ENCODERS = True  # freeze pretrained vision/language encoder weights
 TASK_SUBTASK: str | None = None  # subtask key for nested configs (e.g. LIBERO)
-LANG_DROPOUT_PROB = 0.1  # probability of dropping language conditioning per batch
+LANG_DROPOUT_PROB = 0.01  # probability of dropping language conditioning per sample
 
 # Training  hyperparameters
 WEIGHT_DECAY = 1e-6
@@ -304,6 +316,8 @@ if __name__ == "__main__":
                     if diff_model.lang_encoder is not None
                     else None
                 )
+                if train_batch_idx == 0 and task_desc is not None:
+                    logger.info(f"Sample descriptions from first batch: {task_desc[:3]}")
                 pred_noises = diff_model(
                     noisy_actions,
                     diff_steps,
