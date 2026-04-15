@@ -45,6 +45,13 @@ conda activate libero
 python scripts/rel2abs.py --input_dir data/libero/libero_10
 ```
 
+A quick script that verifies it works by simulating absolute actions on the env and compare original video with new video.
+```bash
+conda activate libero
+python scripts/compare_actions.py
+```
+
+
 Train
 ```bash
 python scripts/train.py
