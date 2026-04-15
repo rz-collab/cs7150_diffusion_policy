@@ -51,10 +51,10 @@ conda activate libero
 python scripts/compare_actions.py
 ```
 
-
 Train
 ```bash
-python scripts/train.py
+python scripts/train.py --env libero
+python scripts/train.py --env pusht
 ```
 
 Visualize train loss via tensorboard
