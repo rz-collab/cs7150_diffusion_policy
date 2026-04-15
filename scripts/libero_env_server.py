@@ -31,6 +31,12 @@
 #               optional task_idx so the client can choose which task to run.
 #               Env is created lazily on first reset and recreated when
 #               task_idx changes.
+#   2026-04-15 | Prompt: Add libero_10 env config | Added "libero_10" entry to
+#               LIBERO_CONFIGS so the --env flag accepts libero_10 as a choice.
+#   2026-04-15 | Prompt: Add all LIBERO task suites | Added libero_object,
+#               libero_goal, libero_90, and libero_100 to LIBERO_CONFIGS. Set
+#               control_delta=False on all suites (including libero_spatial) so
+#               the controller uses absolute target poses.
 # ---
 
 """
@@ -80,7 +86,37 @@ LIBERO_CONFIGS: Dict[str, Dict[str, Any]] = {
         "env_name": "libero_spatial",
         "image_size": 128,
         "image_key": "agentview_image",
-        "control_delta": True,
+        "control_delta": False,
+    },
+    "libero_object": {
+        "env_name": "libero_object",
+        "image_size": 128,
+        "image_key": "agentview_image",
+        "control_delta": False,
+    },
+    "libero_goal": {
+        "env_name": "libero_goal",
+        "image_size": 128,
+        "image_key": "agentview_image",
+        "control_delta": False,
+    },
+    "libero_10": {
+        "env_name": "libero_10",
+        "image_size": 128,
+        "image_key": "agentview_image",
+        "control_delta": False,
+    },
+    "libero_90": {
+        "env_name": "libero_90",
+        "image_size": 128,
+        "image_key": "agentview_image",
+        "control_delta": False,
+    },
+    "libero_100": {
+        "env_name": "libero_100",
+        "image_size": 128,
+        "image_key": "agentview_image",
+        "control_delta": False,
     },
 }
 

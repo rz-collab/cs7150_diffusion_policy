@@ -13,6 +13,9 @@
 #   2026-04-15 | Prompt: Centralize task_descriptions_path in env config | Added
 #               task_descriptions_path field to each env config so train and
 #               inference scripts read the path from config instead of hardcoding it.
+#   2026-04-15 | Prompt: Switch LIBERO to absolute actions | Changed control_delta
+#               from True to False so env config matches absolute-position mode
+#               used by all LIBERO task suites.
 # ---
 
 # NOTE: This is a temporary file to integrate the two different environments frameworks.
@@ -67,7 +70,7 @@ ENV_CONFIGS = {
         "num_diffusion_steps": 100,
         "max_steps": 300,
         # True = actions are deltas from current pose; False = absolute target poses
-        "control_delta": True,
+        "control_delta": False,
     },
 }
 

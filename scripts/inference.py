@@ -56,6 +56,10 @@
 #               hardcoded TASK_DESCRIPTIONS_PATH with cfg["task_descriptions_path"]
 #               and cfg["task_descriptions_key"] so the path is centralized in
 #               env_config.py.
+#   2026-04-15 | Prompt: Load data_stats from checkpoint | LIBERO normalization
+#               stats are now loaded from the checkpoint when available, removing
+#               the HDF5 dependency at inference time. Falls back to computing
+#               from HDF5 files for older checkpoints.
 # ---
 
 # TODO: Review the code generated and make sure it works properly
@@ -220,15 +224,20 @@ def run_inference(
 
     # === Load normalization stats ===
     if env_key == "libero":
-        from diffusion_policy.dataset.libero import (
-            compute_stats_from_hdf5,
-            get_hdf5_files_from_folders,
-        )
+        if "data_stats" in checkpoint:
+            stats: dict = checkpoint["data_stats"]
+            logger.info("Loaded normalization stats from checkpoint")
+        else:
+            from diffusion_policy.dataset.libero import (
+                compute_stats_from_hdf5,
+                get_hdf5_files_from_folders,
+            )
 
-        hdf5_files = get_hdf5_files_from_folders(cfg["dataset_path"])
-        stats: dict = compute_stats_from_hdf5(
-            hdf5_files, ["ee_pos", "ee_ori", "gripper_states"]
-        )
+            logger.info("No stats in checkpoint, computing from HDF5 files")
+            hdf5_files = get_hdf5_files_from_folders(cfg["dataset_path"])
+            stats = compute_stats_from_hdf5(
+                hdf5_files, ["ee_pos", "ee_ori", "gripper_states"]
+            )
     else:
         from diffusion_policy.dataset.pusht import PushTDataset
 
@@ -438,7 +447,7 @@ if __name__ == "__main__":
         help="Environment config key (default: pusht). See env_config.py for options.",
     )
     parser.add_argument(
-        "--checkpoint",
+        "--checkpoint", "--ckpt",
         type=str,
         default=None,
         help="Path to model checkpoint (overrides default)",
