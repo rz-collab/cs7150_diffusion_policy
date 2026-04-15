@@ -31,6 +31,10 @@
 import numpy as np
 import zarr
 from torch.utils.data import Dataset, DataLoader
+from diffusion_policy.util.normalization import (
+    get_data_stats,
+    normalize_data,
+)
 
 
 def create_sample_indices(
@@ -90,27 +94,6 @@ def sample_sequence(
     return result
 
 
-# normalize data
-def get_data_stats(data):
-    data = data.reshape(-1, data.shape[-1])
-    stats = {"min": np.min(data, axis=0), "max": np.max(data, axis=0)}
-    return stats
-
-
-def normalize_data(data, stats):
-    # nomalize to [0,1]
-    ndata = (data - stats["min"]) / (stats["max"] - stats["min"])
-    # normalize to [-1, 1]
-    ndata = ndata * 2 - 1
-    return ndata
-
-
-def unnormalize_data(ndata, stats):
-    ndata = (ndata + 1) / 2
-    data = ndata * (stats["max"] - stats["min"]) + stats["min"]
-    return data
-
-
 class PushTDataset(Dataset):
     def __init__(
         self,
@@ -134,7 +117,7 @@ class PushTDataset(Dataset):
         train_data = {
             # first two dims of state vector are agent (i.e. gripper) locations
             "agent_pos": dataset_root["data"]["state"][:, :2],
-            "action": dataset_root["data"]["action"][:],
+            "actions": dataset_root["data"]["action"][:],
         }
         episode_ends = dataset_root["meta"]["episode_ends"][:]
 
@@ -155,7 +138,7 @@ class PushTDataset(Dataset):
             normalized_train_data[key] = normalize_data(data, stats[key])
 
         # images are already normalized
-        normalized_train_data["image"] = train_image_data
+        normalized_train_data["pixels"] = train_image_data
 
         self.descriptions: list[str] = descriptions or []
         self.lang_dropout_prob = lang_dropout_prob
@@ -166,6 +149,10 @@ class PushTDataset(Dataset):
         self.pred_horizon = pred_horizon
         self.action_horizon = action_horizon
         self.obs_horizon = obs_horizon
+
+    def get_stats(self):
+        """Return a dictionary mapping observation key and a dict containing its min and max"""
+        return self.stats
 
     def __len__(self):
         return len(self.indices)
@@ -187,7 +174,7 @@ class PushTDataset(Dataset):
         )
 
         # discard unused observations
-        nsample["image"] = nsample["image"][: self.obs_horizon, :]
+        nsample["pixels"] = nsample["pixels"][: self.obs_horizon, :]
         nsample["agent_pos"] = nsample["agent_pos"][: self.obs_horizon, :]
 
         # sample a random task description for text conditioning;

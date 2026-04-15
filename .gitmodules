@@ -1,4 +1,4 @@
 [submodule "submodules/LIBERO"]
 	path = submodules/LIBERO
-	url = git@github.com:Lifelong-Robot-Learning/LIBERO.git
+	url = git@github.com:CharlesC03/LIBERO.git
 	branch = master

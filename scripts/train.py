@@ -33,17 +33,32 @@ from torch.utils.data import DataLoader
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.tensorboard import SummaryWriter
 from diffusion_policy.model.diffusion_policy import DiffusionPolicy
-from diffusion_policy.dataset.pusht import PushTDataset
+from diffusion_policy.env_config import get_env_config
+from diffusion_policy.dataset.libero import (
+    compute_stats_from_hdf5,
+    convert_stats_from_np_to_torch,
+)
 import os
 import time
 from datetime import datetime
+import argparse
 
 logging.basicConfig(
     level=logging.INFO, format="[%(asctime)s] [%(levelname)s] %(message)s"
 )
 logger = logging.getLogger(__name__)
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--env", type=str, choices=["pusht", "libero"])
+args = parser.parse_args()
+if args.env is None:
+    parser.error("--env is required. Choose from: pusht, libero")
+
 # == Inputs ==
+ENV = args.env
+cfg = get_env_config(ENV)
+
+# == Training  hyperparameters ==
 DATASET_PATH = os.path.join("data", "pusht_cchi_v7_replay.zarr.zip")
 MODEL_SAVE_DIR = "ckpts"
 MODEL_LOAD_PATH = None
@@ -77,14 +92,15 @@ LANG_DROPOUT_PROB = 0.1  # probability of dropping language conditioning per bat
 WEIGHT_DECAY = 1e-6
 LR = 1e-4
 BATCH_SIZE = 64
-NUM_EPOCHS = 100
+NUM_EPOCHS = 250
 GRAD_CLIP_NORM = 1.0
 NUM_WARMUP_STEPS = 500
 
-# Logger
-LOG_INTERVAL = 1
+# == Other cfg ==
+MODEL_SAVE_DIR = "ckpts"
+MODEL_LOAD_PATH = None
+LOG_INTERVAL = 5  # Log every `LOG_INTERVAL` batch
 
-# TODO: Haven't added validation loop
 
 if __name__ == "__main__":
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -104,14 +120,43 @@ if __name__ == "__main__":
         logger.info(f"Loaded {len(task_descriptions)} descriptions for {TASK_KEY}")
 
     # === Data ===
-    train_ds = PushTDataset(
-        dataset_path=DATASET_PATH,
-        pred_horizon=ACTION_PRED_HORIZON,
-        obs_horizon=OBS_HORIZON,
-        action_horizon=ACTION_EXEC_HORIZON,
-        descriptions=task_descriptions,
-        lang_dropout_prob=LANG_DROPOUT_PROB,
-    )
+    if ENV == "pusht":
+        from diffusion_policy.dataset.pusht import PushTDataset
+
+        train_ds = PushTDataset(
+            dataset_path=cfg["dataset_path"],
+            pred_horizon=cfg["action_pred_horizon"],
+            obs_horizon=cfg["obs_horizon"],
+            action_horizon=cfg["action_exec_horizon"],
+        )
+    elif ENV == "libero":
+        from diffusion_policy.dataset.libero import (
+            get_libero_dataset,
+            get_hdf5_files_from_folders,
+        )
+
+        # Make correction to hyperparams:
+        # Diffusion Policy uses a 6D rotation representation for action output
+        # from the paper Zhou et al. "On the continuity of rotation representations in neural networks."
+        # The observed orientation in state will be quaternion (demonstration uses axis-angle, which gets converted in preprocess_batch).
+        cfg["image_key"] = "agentview_rgb"
+        cfg["state_keys"] = ["ee_pos", "ee_ori", "gripper_states"]
+        cfg["state_obs_dim"] = 3 + 4 + 2
+        cfg["action_dim"] = 3 + 6 + 1
+
+        hdf5_files = get_hdf5_files_from_folders(cfg["dataset_path"])
+        obs_keys = [cfg["image_key"]] + cfg["state_keys"]
+
+        # Compute stats for states and actions for normalization and denormalization purpose
+        data_stats = compute_stats_from_hdf5(hdf5_files, cfg["state_keys"])
+        data_stats = convert_stats_from_np_to_torch(data_stats, device)
+
+        train_ds = get_libero_dataset(
+            hdf5_files=hdf5_files,
+            obs_keys=obs_keys,
+            split="train",
+            seq_length=cfg["action_pred_horizon"],
+        )
 
     train_dl = DataLoader(
         train_ds,
@@ -124,21 +169,25 @@ if __name__ == "__main__":
     )
 
     # === Model ===
-    diff_model = DiffusionPolicy(
-        action_dim=ACTION_DIM,
-        state_obs_dim=STATE_OBS_DIM,
-        obs_horizon=OBS_HORIZON,
-        diff_step_dim=128,
-        down_dims=[512, 1024, 2048],
-        encoder_type=ENCODER_TYPE,
-        pretrained_model=PRETRAINED_MODEL,
-        lang_proj_dim=LANG_PROJ_DIM,
-        freeze_encoders=FREEZE_ENCODERS,
-    ).to(device)
+    diff_model = (
+        DiffusionPolicy(
+            action_dim=cfg["action_dim"],
+            state_obs_dim=cfg["state_obs_dim"],
+            obs_horizon=cfg["obs_horizon"],
+            diff_step_dim=128,
+            down_dims=[512, 1024, 2048],
+            encoder_type=ENCODER_TYPE,
+            pretrained_model=PRETRAINED_MODEL,
+            lang_proj_dim=LANG_PROJ_DIM,
+            freeze_encoders=FREEZE_ENCODERS,
+        )
+        .float()
+        .to(device)
+    )
 
     # cosine noise scheduler and clip output to [-1,1]
     diff_noise_scheduler = DDPMScheduler(
-        num_train_timesteps=NUM_DIFFUSION_STEPS_IN_TRAINING,
+        num_train_timesteps=cfg["num_diffusion_steps"],
         beta_schedule="squaredcos_cap_v2",
         clip_sample=True,
         prediction_type="epsilon",
@@ -188,11 +237,29 @@ if __name__ == "__main__":
                 train_dl, total=len(train_dl), desc="Batch", leave=False
             )
             for train_batch in train_dl_pbar:
-                imgs = train_batch["image"][:, :OBS_HORIZON].to(device)
-                states = None
-                if "agent_pos" in train_batch.keys():
-                    states = train_batch["agent_pos"][:, :OBS_HORIZON].to(device)
-                actions = train_batch["action"][:, :ACTION_PRED_HORIZON].to(device)
+                #  Data Preprocess
+                if ENV == "pusht":
+                    imgs = train_batch[cfg["image_key"]].to(device)
+                    states = train_batch[cfg["state_keys"][0]].to(device)
+                    actions = train_batch["actions"].to(device)
+                    language = None
+                elif ENV == "libero":
+                    from diffusion_policy.dataset.libero import preprocess_libero_batch
+
+                    train_batch = preprocess_libero_batch(
+                        train_batch,
+                        stats=data_stats,
+                        device=device,
+                        obs_horizon=cfg["obs_horizon"],
+                        image_keys=[cfg["image_key"]],
+                    )
+                    imgs = train_batch["obs"][cfg["image_key"]]
+                    states = torch.cat(
+                        [train_batch["obs"][k] for k in cfg["state_keys"]],
+                        dim=-1,
+                    )
+                    actions = train_batch["actions"]
+                    language = train_batch["language"]
 
                 # Diffusion Training:
                 # 1. Sample noise
@@ -201,7 +268,7 @@ if __name__ == "__main__":
                 # 2. Sample diffusion step
                 diff_steps = torch.randint(
                     low=0,
-                    high=NUM_DIFFUSION_STEPS_IN_TRAINING,
+                    high=cfg["num_diffusion_steps"],
                     size=(BATCH_SIZE,),
                     device=device,
                 )
@@ -255,7 +322,7 @@ if __name__ == "__main__":
         # Save model parameters (EMA) either when interrupted or training done.
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_model_path = os.path.join(
-            MODEL_SAVE_DIR, f"epoch_{epoch_idx}_{timestamp}_model.pth"
+            MODEL_SAVE_DIR, f"{ENV}_epoch_{epoch_idx}_{timestamp}_model.pth"
         )
         logger.info(f"Saving model checkpoint at {output_model_path}")
 

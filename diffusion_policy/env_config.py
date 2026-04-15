@@ -18,6 +18,10 @@
 # Make sure that these are worth keeping or if there is anything I should change to make it
 # better/function better.
 
+# |o|o|                             observations: 2
+# | |a|a|a|a|a|a|a|a|               actions executed: 8
+# |p|p|p|p|p|p|p|p|p|p|p|p|p|p|p|p| actions predicted: 16
+
 ENV_CONFIGS = {
     "pusht": {
         "env_name": "gym_pusht/PushT-v0",
@@ -34,16 +38,16 @@ ENV_CONFIGS = {
         "num_diffusion_steps": 100,
         "max_steps": 300,
     },
-    "libero_spatial": {
-        "env_name": "libero_spatial",
+    "libero": {
+        "env_name": "libero",
         "action_dim": 7,
-        "state_obs_dim": 8,
+        "state_obs_dim": 9,
         "image_size": 128,
         "image_key": "agentview_image",
         "state_keys": ["robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos"],
         "gym_api": "gym",  # 4-tuple (obs, reward, done, info)
         "zmq_address": "tcp://localhost:5555",
-        "dataset_path": "data/libero_spatial",
+        "dataset_path": ["data/libero/libero_10"],
         "obs_horizon": 2,
         "action_exec_horizon": 8,
         "action_pred_horizon": 16,
