@@ -41,7 +41,7 @@ ENV_CONFIGS = {
         "state_keys": ["agent_pos"],
         "gym_api": "gymnasium",  # 5-tuple (obs, reward, terminated, truncated, info)
         "dataset_path": "data/pusht_cchi_v7_replay.zarr.zip",
-        "task_descriptions_path": 'diffusion_policy/dataset/pusht_descriptions.json',
+        "task_descriptions_path": TASK_DESCRIPTIONS_PATH,
         "task_descriptions_key": "pusht",
         "obs_horizon": 2,
         "action_exec_horizon": 8,

@@ -98,8 +98,8 @@ LANG_DROPOUT_PROB = 0.1  # probability of dropping language conditioning per bat
 # Training  hyperparameters
 WEIGHT_DECAY = 1e-6
 LR = 1e-4
-BATCH_SIZE = 64
-NUM_EPOCHS = 250
+BATCH_SIZE = 128
+NUM_EPOCHS = 20
 GRAD_CLIP_NORM = 1.0
 NUM_WARMUP_STEPS = 500
 
