@@ -385,7 +385,7 @@ def run_inference(
                 )
             else:
                 pred_actions = noisy_actions.detach().cpu().numpy()[0]
-                pred_actions = unnormalize_data(pred_actions, stats["action"])
+                pred_actions = unnormalize_data(pred_actions, stats["actions"])
 
             # Only take action horrizon number of actions
             start = cfg["obs_horizon"] - 1

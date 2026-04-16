@@ -129,6 +129,31 @@ NUM_WARMUP_STEPS = 500
 MODEL_SAVE_DIR = "ckpts"
 MODEL_LOAD_PATH = None
 LOG_INTERVAL = 5  # Log every `LOG_INTERVAL` batch
+CHECKPOINT_INTERVAL = 25  # Save checkpoint every `CHECKPOINT_INTERVAL` epochs
+
+
+def save_checkpoint(diff_model, ema, epoch_idx, save_dir, env_name, data_stats=None):
+    """Save a model checkpoint, optionally applying EMA weights first."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_model_path = os.path.join(
+        save_dir, f"{env_name}_epoch_{epoch_idx}_{timestamp}_model.pth"
+    )
+    logger.info(f"Saving model checkpoint at {output_model_path}")
+
+    # Temporarily copy EMA weights into model, save, then restore
+    ema.store(diff_model.parameters())
+    ema.copy_to(diff_model.parameters())
+    save_dict: dict = {
+        "model_state_dict": diff_model.state_dict(),
+        "model_config": diff_model.model_config,
+    }
+    if data_stats is not None:
+        save_dict["data_stats"] = data_stats
+    torch.save(save_dict, output_model_path)
+
+    ema.restore(diff_model.parameters())
+
+    return output_model_path
 
 
 if __name__ == "__main__":
@@ -364,6 +389,11 @@ if __name__ == "__main__":
                     train_dl_pbar.set_postfix(loss=loss_cpu)
                 train_batch_idx += 1
 
+            # Periodic checkpoint saving
+            if (epoch_idx + 1) % CHECKPOINT_INTERVAL == 0:
+                _stats = data_stats_np if ENV == "libero" else None
+                save_checkpoint(diff_model, ema, epoch_idx, MODEL_SAVE_DIR, ENV, data_stats=_stats)
+
         end_time = time.perf_counter()
         logger.info(f"Training complete. Took {end_time - start_time:.2f}s")
 
@@ -371,22 +401,6 @@ if __name__ == "__main__":
         logger.warning("Training interrupted manually.")
     finally:
         # Save model parameters (EMA) either when interrupted or training done.
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_model_path = os.path.join(
-            MODEL_SAVE_DIR, f"{ENV}_epoch_{epoch_idx}_{timestamp}_model.pth"
-        )
-        logger.info(f"Saving model checkpoint at {output_model_path}")
-
-        ema.copy_to(diff_model.parameters())
-        save_dict: dict = {
-            "model_state_dict": diff_model.state_dict(),
-            "model_config": diff_model.model_config,
-        }
-        if ENV == "libero":
-            save_dict["data_stats"] = data_stats_np
-        torch.save(
-            save_dict,
-            output_model_path,
-        )
-
+        _stats = data_stats_np if ENV == "libero" else None
+        save_checkpoint(diff_model, ema, epoch_idx, MODEL_SAVE_DIR, ENV, data_stats=_stats)
         writer.close()
