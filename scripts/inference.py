@@ -60,6 +60,13 @@
 #               stats are now loaded from the checkpoint when available, removing
 #               the HDF5 dependency at inference time. Falls back to computing
 #               from HDF5 files for older checkpoints.
+#   2026-04-15 | Prompt: Support new vision/text_encoder config | Import and
+#               apply _convert_legacy_model_config to translate old encoder_type
+#               checkpoint configs to the new vision_encoder/text_encoder params.
+#   2026-04-15 | Prompt: Fix weights_only load error | Changed torch.load to
+#               weights_only=False because the checkpoint contains numpy arrays
+#               (via numpy._core.multiarray._reconstruct) which are rejected by
+#               PyTorch 2.6+'s default weights_only=True safe-unpickling.
 # ---
 
 # TODO: Review the code generated and make sure it works properly
@@ -74,7 +81,10 @@ import logging
 from collections import deque
 from tqdm import tqdm
 from diffusers import DDPMScheduler
-from diffusion_policy.model.diffusion_policy import DiffusionPolicy
+from diffusion_policy.model.diffusion_policy import (
+    DiffusionPolicy,
+    _convert_legacy_model_config,
+)
 from diffusion_policy.util.normalization import unnormalize_data, normalize_data
 from diffusion_policy.env_config import get_env_config
 
@@ -191,7 +201,7 @@ def run_inference(
 
     # === Load model (before stats so shape errors surface quickly) ===
     checkpoint: dict = torch.load(
-        MODEL_LOAD_PATH, map_location=device, weights_only=True
+        MODEL_LOAD_PATH, map_location=device, weights_only=False
     )
 
     # Support both new format (dict with model_config) and legacy (bare state_dict)
@@ -216,6 +226,9 @@ def run_inference(
     if env_key == "libero":
         model_config["action_dim"] = 3 + 6 + 1   # pos + rot_6d + gripper
         model_config["state_obs_dim"] = 3 + 4 + 2  # ee_pos + quat + gripper
+
+    # Convert old encoder_type-based configs to vision/text_encoder style
+    model_config = _convert_legacy_model_config(model_config)
 
     diff_model = DiffusionPolicy(**model_config).to(device)
     diff_model.load_state_dict(state_dict)
@@ -375,7 +388,7 @@ def run_inference(
                 pred_actions = unnormalize_data(pred_actions, stats["action"])
 
             # Only take action horrizon number of actions
-            start = cfg["action_exec_horizon"] - 1
+            start = cfg["obs_horizon"] - 1
             end = start + cfg["action_exec_horizon"]
             action = pred_actions[start:end, :]
 

@@ -33,6 +33,13 @@
 #               TqdmLoggingHandler so logger.info doesn't break progress bars.
 #               Log sample descriptions from the first batch to verify they
 #               reach the model.
+#   2026-04-15 | Prompt: Save data_stats in checkpoint | Saved a numpy copy of
+#               LIBERO normalization stats (data_stats_np) into the checkpoint so
+#               inference can unnormalize actions without scanning HDF5 files.
+#   2026-04-15 | Prompt: Replace encoder_type with vision/text encoder | Replaced
+#               ENCODER_TYPE, PRETRAINED_MODEL, TEXT_PRETRAINED_MODEL with
+#               VISION_ENCODER and TEXT_ENCODER. Updated DiffusionPolicy call
+#               and description-loading guard to use new params.
 # ---
 
 import json
@@ -95,15 +102,18 @@ NUM_DIFFUSION_STEPS_IN_TRAINING = 100
 ACTION_DIM = 2
 STATE_OBS_DIM = 2
 
-# Encoder setting
-# "resnet_only"     — ResNet-18 vision, no language
-# "clip_text"       — ResNet-18 vision + pretrained text encoder
-# "clip_both"       — Pretrained vision + pretrained text encoder
-# "resnet_and_text" — ResNet-18 vision + standalone text encoder
-ENCODER_TYPE = "clip_both"
-PRETRAINED_MODEL = "clip-vit-b-32"  # "clip-vit-b-16", "siglip-base-patch16-224", "siglip2-base-patch16-224"
+# Encoder settings
+# Vision: model key from PRETRAINED_VISION_MODELS, or None for ResNet-18
+#   Options: "clip-vit-b-16", "siglip-base-patch16-224", "siglip2-base-patch16-224",
+#            "dinov2-small", "dinov2-base", "dinov2-large", None
+VISION_ENCODER: str | None = "dinov2-small"
+# Text: model key for clip/siglip text encoder, "text" for standalone, or None for no language
+#   Options: "clip-vit-b-16", "siglip-base-patch16-224", "siglip2-base-patch16-224",
+#            "text", None
+TEXT_ENCODER: str | None = "siglip2-base-patch16-224"
 LANG_PROJ_DIM = 256
-FREEZE_ENCODERS = True  # freeze pretrained vision/language encoder weights
+FREEZE_VISION_ENCODER = True  # freeze pretrained vision encoder weights
+FREEZE_TEXT_ENCODER = True  # freeze pretrained text encoder weights
 TASK_SUBTASK: str | None = None  # subtask key for nested configs (e.g. LIBERO)
 LANG_DROPOUT_PROB = 0.01  # probability of dropping language conditioning per sample
 
@@ -111,7 +121,7 @@ LANG_DROPOUT_PROB = 0.01  # probability of dropping language conditioning per sa
 WEIGHT_DECAY = 1e-6
 LR = 1e-4
 BATCH_SIZE = 128
-NUM_EPOCHS = 20
+NUM_EPOCHS = 30
 GRAD_CLIP_NORM = 1.0
 NUM_WARMUP_STEPS = 500
 
@@ -134,7 +144,7 @@ if __name__ == "__main__":
     task_descriptions_by_task: dict[str, list[str]] | None = None
     desc_path: str = cfg.get("task_descriptions_path", "")
     desc_key: str = cfg.get("task_descriptions_key", ENV)
-    if ENCODER_TYPE != "resnet_only" and desc_path and os.path.exists(desc_path):
+    if TEXT_ENCODER is not None and desc_path and os.path.exists(desc_path):
         with open(desc_path, "r") as f:
             all_descriptions: dict = json.load(f)
         entry = all_descriptions.get(desc_key, [])
@@ -179,6 +189,12 @@ if __name__ == "__main__":
 
         # Compute stats for states and actions for normalization and denormalization purpose
         data_stats = compute_stats_from_hdf5(hdf5_files, cfg["state_keys"])
+        # Keep a numpy copy for the checkpoint so inference can unnormalize
+        # without needing access to the original HDF5 files.
+        data_stats_np = {
+            "obs": {k: dict(v) for k, v in data_stats["obs"].items()},
+            "actions": {k: dict(v) for k, v in data_stats["actions"].items()},
+        }
         data_stats = convert_stats_from_np_to_torch(data_stats, device)
 
         train_ds = get_libero_dataset(
@@ -208,10 +224,11 @@ if __name__ == "__main__":
             obs_horizon=cfg["obs_horizon"],
             diff_step_dim=128,
             down_dims=[512, 1024, 2048],
-            encoder_type=ENCODER_TYPE,
-            pretrained_model=PRETRAINED_MODEL,
+            vision_encoder=VISION_ENCODER,
+            text_encoder=TEXT_ENCODER,
             lang_proj_dim=LANG_PROJ_DIM,
-            freeze_encoders=FREEZE_ENCODERS,
+            freeze_vision_encoder=FREEZE_VISION_ENCODER,
+            freeze_text_encoder=FREEZE_TEXT_ENCODER,
         )
         .float()
         .to(device)
@@ -361,11 +378,14 @@ if __name__ == "__main__":
         logger.info(f"Saving model checkpoint at {output_model_path}")
 
         ema.copy_to(diff_model.parameters())
+        save_dict: dict = {
+            "model_state_dict": diff_model.state_dict(),
+            "model_config": diff_model.model_config,
+        }
+        if ENV == "libero":
+            save_dict["data_stats"] = data_stats_np
         torch.save(
-            {
-                "model_state_dict": diff_model.state_dict(),
-                "model_config": diff_model.model_config,
-            },
+            save_dict,
             output_model_path,
         )
 

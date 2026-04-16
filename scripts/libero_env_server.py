@@ -37,6 +37,9 @@
 #               libero_goal, libero_90, and libero_100 to LIBERO_CONFIGS. Set
 #               control_delta=False on all suites (including libero_spatial) so
 #               the controller uses absolute target poses.
+#   2026-04-15 | Prompt: Change default to absolute actions | Flipped
+#               --absolute-actions to --delta-actions so the default is absolute
+#               position mode, matching the config values in LIBERO_CONFIGS.
 # ---
 
 """
@@ -457,10 +460,10 @@ if __name__ == "__main__":
              "Use 'both' for agentview_image + robot0_eye_in_hand_image.",
     )
     parser.add_argument(
-        "--absolute-actions",
+        "--delta-actions",
         action="store_true",
-        help="Use absolute target poses instead of delta actions "
-             "(sets control_delta=False on the OSC_POSE controller)",
+        help="Use delta actions instead of absolute target poses "
+             "(sets control_delta=True on the OSC_POSE controller)",
     )
     args = parser.parse_args()
 
@@ -474,5 +477,5 @@ if __name__ == "__main__":
         record=args.save_video,
         video_dir=args.video_dir,
         camera_keys=args.video_cameras,
-        control_delta=not args.absolute_actions,
+        control_delta=args.delta_actions,
     )

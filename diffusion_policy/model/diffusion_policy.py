@@ -15,6 +15,22 @@
 #               flags with a single encoder_type string ("resnet_only",
 #               "clip_text", "clip_both", "resnet_and_text") and one
 #               freeze_encoders bool.
+#   2026-04-15 | Prompt: Add DINOv2 encoder support | Added "dino_only",
+#               "dino_clip_text", and "dino_text" encoder types. DINOv2 vision
+#               is paired with no language, a pretrained CLIP/SigLIP text
+#               encoder, or a standalone text encoder respectively.
+#   2026-04-15 | Prompt: Replace encoder_type with vision/text encoder keys |
+#               Replaced encoder_type, pretrained_model, text_pretrained_model
+#               with two simple params: vision_encoder (model key or None for
+#               ResNet-18) and text_encoder (model key, "text", or None for no
+#               language). When both point to the same clip/siglip model,
+#               weights are shared. Old checkpoint model_configs are converted
+#               automatically.
+#   2026-04-15 | Prompt: Add vision projection layer | Added vision_proj_dim
+#               parameter (default 512) that adds a trainable projection MLP
+#               to pretrained vision encoders, matching ResNet-18 output dim.
+#               Does not apply to ResNet-18 itself. Legacy checkpoint configs
+#               default to None (no projection) for backwards compatibility.
 # ---
 
 import torch
@@ -22,6 +38,7 @@ import torch.nn as nn
 from diffusion_policy.model.visual_encoder import (
     get_visual_encoder,
     PretrainedVisualEncoder,
+    DINOv2VisualEncoder,
     PRETRAINED_VISION_MODELS,
 )
 from diffusion_policy.model.denoiser import ConditionalUnet1D
@@ -58,7 +75,41 @@ class SinusoidalPositionEmbedding(nn.Module):
         return pe
 
 
-VALID_ENCODER_TYPES = {"resnet_only", "clip_text", "clip_both", "resnet_and_text"}
+def _convert_legacy_model_config(cfg: dict) -> dict:
+    """Convert old encoder_type-based model configs to vision/text_encoder style."""
+    if "vision_encoder" in cfg:
+        # Convert old freeze_encoders to split flags if needed
+        if "freeze_encoders" in cfg:
+            freeze: bool = cfg.pop("freeze_encoders")
+            cfg.setdefault("freeze_vision_encoder", freeze)
+            cfg.setdefault("freeze_text_encoder", freeze)
+        # Old checkpoints without vision projection — default to None
+        cfg.setdefault("vision_proj_dim", None)
+        return cfg
+
+    encoder_type: str = cfg.pop("encoder_type", "resnet_only")
+    pretrained_model: str = cfg.pop("pretrained_model", "clip-vit-b-32")
+    text_pretrained_model: str | None = cfg.pop("text_pretrained_model", None)
+    freeze = cfg.pop("freeze_encoders", False)
+    cfg["freeze_vision_encoder"] = freeze
+    cfg["freeze_text_encoder"] = freeze
+
+    if encoder_type in ("clip_both",):
+        cfg["vision_encoder"] = pretrained_model
+        cfg["text_encoder"] = text_pretrained_model or pretrained_model
+    elif encoder_type in ("clip_text", "dino_clip_text"):
+        cfg["vision_encoder"] = pretrained_model if encoder_type.startswith("dino") else None
+        cfg["text_encoder"] = text_pretrained_model or pretrained_model
+    elif encoder_type in ("resnet_and_text", "dino_text"):
+        cfg["vision_encoder"] = pretrained_model if encoder_type.startswith("dino") else None
+        cfg["text_encoder"] = "text"
+    elif encoder_type in ("dino_only",):
+        cfg["vision_encoder"] = pretrained_model
+        cfg["text_encoder"] = None
+    else:
+        cfg["vision_encoder"] = None
+        cfg["text_encoder"] = None
+    return cfg
 
 
 class DiffusionPolicy(nn.Module):
@@ -71,33 +122,33 @@ class DiffusionPolicy(nn.Module):
         down_dims: list[int] = [256, 512, 1024],
         kernel_size: int = 5,
         n_groups: int = 8,
-        encoder_type: str = "resnet_only",
-        pretrained_model: str = "clip-vit-b-32",
+        vision_encoder: str | None = None,
+        text_encoder: str | None = None,
+        vision_proj_dim: int | None = 512,
         lang_proj_dim: int = 256,
-        freeze_encoders: bool = False,
+        freeze_vision_encoder: bool = False,
+        freeze_text_encoder: bool = False,
+        **kwargs,
     ):
         """
         Args:
-            encoder_type: Selects vision and language encoders.
-                "resnet_only"    — ResNet-18 vision, no language.
-                "clip_text"      — ResNet-18 vision + pretrained text encoder.
-                "clip_both"      — Pretrained vision + pretrained text encoder.
-                "resnet_and_text" — ResNet-18 vision + standalone text encoder.
-            pretrained_model: Which pretrained model to use for vision/language
-                when encoder_type is "clip_text" or "clip_both".
-                See PRETRAINED_VISION_MODELS in visual_encoder.py for options.
+            vision_encoder: Key into PRETRAINED_VISION_MODELS for the vision
+                backbone (e.g. "siglip2-base-patch16-224", "dinov2-base").
+                None uses ResNet-18.
+            text_encoder: Key into PRETRAINED_VISION_MODELS for a clip/siglip
+                text encoder, "text" for the standalone sentence-transformer,
+                or None to disable language conditioning.
+            vision_proj_dim: Output dimension of the trainable vision
+                projection MLP. Only applies to pretrained vision encoders
+                (not ResNet-18). None disables projection. Defaults to 512
+                to match ResNet-18 output.
             lang_proj_dim: Output dimension of the language projection MLP.
-            freeze_encoders: If True, freeze pretrained encoder weights
-                             (vision and/or language) so only the projection
-                             MLP and the UNet train.
+            freeze_vision_encoder: If True, freeze pretrained vision encoder
+                weights so only the UNet trains on visual features.
+            freeze_text_encoder: If True, freeze pretrained text encoder
+                weights so only the projection MLP trains.
         """
         super().__init__()
-
-        if encoder_type not in VALID_ENCODER_TYPES:
-            raise ValueError(
-                f"Unknown encoder_type '{encoder_type}'. "
-                f"Valid options: {sorted(VALID_ENCODER_TYPES)}"
-            )
 
         # Store config for checkpoint serialization
         self.model_config: dict = {
@@ -108,40 +159,56 @@ class DiffusionPolicy(nn.Module):
             "down_dims": down_dims,
             "kernel_size": kernel_size,
             "n_groups": n_groups,
-            "encoder_type": encoder_type,
-            "pretrained_model": pretrained_model,
+            "vision_encoder": vision_encoder,
+            "text_encoder": text_encoder,
+            "vision_proj_dim": vision_proj_dim,
             "lang_proj_dim": lang_proj_dim,
-            "freeze_encoders": freeze_encoders,
+            "freeze_vision_encoder": freeze_vision_encoder,
+            "freeze_text_encoder": freeze_text_encoder,
         }
 
-        # Load the full pretrained model once when using clip_both,
-        # so vision and text encoders share the exact same weights.
+        # --- Vision encoder ---
         shared_text_model = None
-        if encoder_type == "clip_both":
-            config = PRETRAINED_VISION_MODELS[pretrained_model]
-            family: str = config["family"]
+        if vision_encoder is not None:
+            vis_config = PRETRAINED_VISION_MODELS[vision_encoder]
+            vis_family: str = vis_config["family"]
 
-            if family == "clip":
-                from transformers import CLIPModel
+            if vis_family == "dino":
+                self.visual_encoder: nn.Module = DINOv2VisualEncoder(
+                    model_key=vision_encoder,
+                    proj_dim=vision_proj_dim,
+                )
+            elif (
+                vis_family in ("clip", "siglip")
+                and text_encoder == vision_encoder
+            ):
+                # Same model for vision and text — share weights
+                if vis_family == "clip":
+                    from transformers import CLIPModel
+                    full_model = CLIPModel.from_pretrained(vis_config["hf_name"])
+                else:
+                    from transformers import SiglipModel
+                    full_model = SiglipModel.from_pretrained(vis_config["hf_name"])
 
-                full_model = CLIPModel.from_pretrained(config["hf_name"])
-            elif family == "siglip":
-                from transformers import SiglipModel
+                self.visual_encoder = PretrainedVisualEncoder(
+                    model_key=vision_encoder,
+                    vision_model=full_model.vision_model,
+                    visual_projection=full_model.visual_projection,
+                    proj_dim=vision_proj_dim,
+                )
+                shared_text_model = full_model.text_model
+            else:
+                self.visual_encoder = PretrainedVisualEncoder(
+                    model_key=vision_encoder,
+                    proj_dim=vision_proj_dim,
+                )
 
-                full_model = SiglipModel.from_pretrained(config["hf_name"])
-
-            self.visual_encoder: nn.Module = PretrainedVisualEncoder(
-                model_key=pretrained_model,
-                vision_model=full_model.vision_model,
-                visual_projection=full_model.visual_projection,
-            )
-            shared_text_model = full_model.text_model
             visual_obs_dim: int = self.visual_encoder.output_dim
         else:
             self.visual_encoder = get_visual_encoder()
             visual_obs_dim = 512  # ResNet-18 output dim
 
-        if freeze_encoders:
+        if freeze_vision_encoder:
             for param in self.visual_encoder.parameters():
                 param.requires_grad = False
 
@@ -150,20 +217,15 @@ class DiffusionPolicy(nn.Module):
 
         cond_dim = (visual_obs_dim + state_obs_dim) * obs_horizon + diff_step_dim
 
-        # Language encoder (optional, depends on encoder_type)
-        lang_backend: str | None = None
-        if encoder_type in ("clip_text", "clip_both"):
-            lang_backend = "clip"
-        elif encoder_type == "resnet_and_text":
-            lang_backend = "text"
-
+        # --- Language encoder (optional) ---
         self.lang_encoder: LanguageEncoder | None = None
-        if lang_backend is not None:
+        if text_encoder is not None:
+            lang_backend: str = "text" if text_encoder == "text" else "clip"
             self.lang_encoder = LanguageEncoder(
                 encoder_type=lang_backend,
                 proj_dim=lang_proj_dim,
-                freeze=freeze_encoders,
-                pretrained_model=pretrained_model,
+                freeze=freeze_text_encoder,
+                pretrained_model=text_encoder,
                 text_model=shared_text_model,
             )
             cond_dim += lang_proj_dim
@@ -177,7 +239,8 @@ class DiffusionPolicy(nn.Module):
             n_groups=n_groups,
         )
 
-        print(f"Encoder type: {encoder_type}, pretrained model: {pretrained_model}")
+        print(f"Vision encoder: {vision_encoder or 'resnet18'}, "
+              f"Text encoder: {text_encoder or 'none'}")
         print(f"Condition features dimension: {cond_dim}")
         print(f"Number of Parameters: {sum(p.numel() for p in self.parameters()):,}")
 
