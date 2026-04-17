@@ -343,8 +343,6 @@ if __name__ == "__main__":
                     if diff_model.lang_encoder is not None
                     else None
                 )
-                if train_batch_idx == 0 and task_desc is not None:
-                    logger.info(f"Sample descriptions from first batch: {task_desc[:3]}")
                 pred_noises = diff_model(
                     noisy_actions,
                     diff_steps,
