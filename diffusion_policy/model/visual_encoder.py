@@ -2,7 +2,7 @@
 # Generated: 2026-04-06 | claude-opus-4-6
 # Prompt: Resnet18 visual encoder, copied from Diffusion Policy Colab's Notebook.
 # Modifications:
-#   2026-04-14 | Prompt: Add CLIP vision encoder option | Added CLIPVisualEncoder
+#   2026-04-14 | Prompt: Add CLIP vision encoder option | Added CLIPEncoder
 #               that wraps CLIP ViT-B/32 vision model.  Resizes and normalizes
 #               inputs to CLIP's expected format, outputs 512-dim features matching
 #               the ResNet-18 interface.
@@ -15,6 +15,29 @@
 #               When set, a trainable 2-layer MLP (Linear→Mish→Linear) projects
 #               encoder output to proj_dim, updating output_dim accordingly.
 #               None (default) preserves original behavior with no projection.
+#   2026-04-17 | Prompt: Option B freeze_backbone — add freeze_backbone() method
+#               to DINOv2VisualEncoder and PretrainedVisualEncoder so callers
+#               can freeze only the pretrained backbone weights while leaving
+#               the trainable projection MLP (self.proj) unfrozen.
+#   2026-04-17 | Prompt: Abstract base class for vision encoders — added
+#               Encoder ABC with abstract freeze_backbone() and updated
+#               DINOv2VisualEncoder and PretrainedVisualEncoder to inherit from
+#               it. get_visual_encoder() still returned plain nn.Module.
+#   2026-04-17 | Prompt: Update ResNet for Encoder ABC — wrapped ResNet-18
+#               in ResNetVisualEncoder(Encoder) with output_dim=512.
+#               freeze_backbone() raises NotImplementedError since ResNet-18 has
+#               no separate projection layer. Updated get_visual_encoder() to
+#               return ResNetVisualEncoder.
+#   2026-04-17 | Prompt: Unify encoder base class — moved Encoder ABC into
+#               encoder_base.py as Encoder so LanguageEncoder can share it.
+#               Removed Encoder class; all subclasses now inherit Encoder.
+#   2026-04-17 | Prompt: Test all encoders — fixed PretrainedVisualEncoder to
+#               use nn.Identity() when the model has no visual_projection (e.g.
+#               SigLIP), since SigLIP's pooler_output is already the final
+#               embedding with no separate projection head.
+#   2026-04-17 | Prompt: Unify encoder base class — renamed Encoder to
+#               Encoder so LanguageEncoder can also inherit from it. Updated
+#               all subclass declarations and exports accordingly.
 # ---
 
 import torch
@@ -23,11 +46,7 @@ import torch.nn.functional as F
 import torchvision
 from typing import Callable
 
-
-def get_visual_encoder() -> nn.Module:
-    resnet = get_resnet("resnet18")
-    resnet_with_gn = replace_bn_with_gn(resnet)
-    return resnet_with_gn
+from diffusion_policy.model.encoder_base import Encoder
 
 
 def get_resnet(name: str, weights=None, **kwargs) -> nn.Module:
@@ -104,6 +123,34 @@ def replace_bn_with_gn(
     return root_module
 
 
+class ResNetVisualEncoder(Encoder):
+    """ResNet-18 visual encoder with GroupNorm.
+
+    Does not support freeze_backbone() — ResNet-18 has no separate projection
+    layer, so there is no meaningful backbone/projection boundary.
+    """
+
+    output_dim: int = 512
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.encoder: nn.Module = replace_bn_with_gn(get_resnet("resnet18"))
+
+    def freeze_backbone(self) -> None:
+        raise NotImplementedError(
+            "ResNetVisualEncoder has no projection layer separate from its "
+            "backbone. freeze_backbone() is not supported — freeze parameters "
+            "directly if needed."
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.encoder(x)
+
+
+def get_visual_encoder() -> ResNetVisualEncoder:
+    return ResNetVisualEncoder()
+
+
 PRETRAINED_VISION_MODELS: dict[str, dict] = {
     "clip-vit-b-32": {
         "hf_name": "openai/clip-vit-base-patch32",
@@ -164,7 +211,7 @@ PRETRAINED_VISION_MODELS: dict[str, dict] = {
 }
 
 
-class DINOv2VisualEncoder(nn.Module):
+class DINOv2VisualEncoder(Encoder):
     """Pretrained DINOv2 vision encoder.
 
     Uses the CLS token output from DINOv2's ViT backbone. Handles resizing
@@ -211,6 +258,11 @@ class DINOv2VisualEncoder(nn.Module):
             "_std", torch.tensor(config["std"]).view(1, 3, 1, 1)
         )
 
+    def freeze_backbone(self) -> None:
+        """Freeze the pretrained DINOv2 backbone, leaving self.proj trainable."""
+        for param in self.encoder.parameters():
+            param.requires_grad = False
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
@@ -235,7 +287,7 @@ class DINOv2VisualEncoder(nn.Module):
         return cls_token
 
 
-class PretrainedVisualEncoder(nn.Module):
+class PretrainedVisualEncoder(Encoder):
     """Pretrained vision encoder (CLIP or SigLIP family).
 
     Handles resizing and model-specific normalization internally, so the
@@ -288,7 +340,8 @@ class PretrainedVisualEncoder(nn.Module):
                 model = SiglipModel.from_pretrained(hf_name)
 
             self.vision_model = model.vision_model
-            self.visual_projection = model.visual_projection
+            # SigLIP has no visual_projection; its pooler_output is the final embedding
+            self.visual_projection: nn.Module = getattr(model, "visual_projection", nn.Identity())
 
         # Trainable projection MLP (encoder_dim → proj_dim)
         if proj_dim is not None:
@@ -309,6 +362,13 @@ class PretrainedVisualEncoder(nn.Module):
         self.register_buffer(
             "_std", torch.tensor(config["std"]).view(1, 3, 1, 1)
         )
+
+    def freeze_backbone(self) -> None:
+        """Freeze the pretrained vision backbone and its projection, leaving self.proj trainable."""
+        for param in self.vision_model.parameters():
+            param.requires_grad = False
+        for param in self.visual_projection.parameters():
+            param.requires_grad = False
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
