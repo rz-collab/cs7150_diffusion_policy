@@ -62,6 +62,15 @@ Visualize train loss via tensorboard
 tensorboard --logdir runs/
 ```
 
+Inference with Libero
+
+Libero simulation environment server
+```bash
+conda activate libero
+python scripts/libero_env_server.py --env libero_goal --save-video
+```
+
+
 
 
 

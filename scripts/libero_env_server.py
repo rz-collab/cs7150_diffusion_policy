@@ -182,7 +182,9 @@ def save_video(
                 continue
             img: np.ndarray = np.flipud(obs[key])
             img = cv2.resize(
-                img, (output_size, output_size), interpolation=cv2.INTER_NEAREST,
+                img,
+                (output_size, output_size),
+                interpolation=cv2.INTER_NEAREST,
             )
             panels.append(img)
         if panels:
@@ -208,6 +210,12 @@ def save_video(
 def handle_reset(env) -> Dict[str, Any]:
     """Reset the environment and return the initial observation."""
     obs: dict = env.reset()
+
+    # When env resets, objects are dropped unnaturally from some height.
+    # Skip these frames by doing nothing.
+    for _ in range(10):
+        obs, _, _, _ = env.step(np.zeros(7))
+
     return {"status": "ok", "obs": obs}
 
 
@@ -296,9 +304,7 @@ def run_session(
                 logger.info(
                     f"Loading task {task_idx}: {tasks[task_idx]['description']}"
                 )
-                env = make_libero_env(
-                    tasks[task_idx]["task"], cfg, control_delta
-                )
+                env = make_libero_env(tasks[task_idx]["task"], cfg, control_delta)
                 current_task_idx = task_idx
 
             response = handle_reset(env)
@@ -342,7 +348,14 @@ def run_session(
     return False, obs_history
 
 
-def run_server(env_key: str, port: int, record: bool, video_dir: str, camera_keys: List[str], control_delta: bool = True) -> None:
+def run_server(
+    env_key: str,
+    port: int,
+    record: bool,
+    video_dir: str,
+    camera_keys: List[str],
+    control_delta: bool = True,
+) -> None:
     """Start the ZMQ REP server and serve environment sessions in a loop."""
     cfg = LIBERO_CONFIGS[env_key]
     image_key: str = cfg.get("image_key", "agentview_image")
@@ -357,12 +370,14 @@ def run_server(env_key: str, port: int, record: bool, video_dir: str, camera_key
     tasks: List[Dict[str, Any]] = []
     for i in range(num_tasks):
         task = task_suite.get_task(i)
-        tasks.append({
-            "idx": i,
-            "name": task.name,
-            "description": get_task_description(task.name),
-            "task": task,
-        })
+        tasks.append(
+            {
+                "idx": i,
+                "name": task.name,
+                "description": get_task_description(task.name),
+                "task": task,
+            }
+        )
     logger.info(f"Loaded {num_tasks} tasks from {cfg['env_name']}:")
     for t in tasks:
         logger.info(f"  [{t['idx']}] {t['description']}")
@@ -392,8 +407,13 @@ def run_server(env_key: str, port: int, record: bool, video_dir: str, camera_key
 
         try:
             should_continue, obs_history = run_session(
-                socket, tasks, cfg, control_delta,
-                image_key, record, shutdown,
+                socket,
+                tasks,
+                cfg,
+                control_delta,
+                image_key,
+                record,
+                shutdown,
             )
         except zmq.ZMQError as e:
             if e.errno == zmq.ETERM:
@@ -456,14 +476,14 @@ if __name__ == "__main__":
         nargs="+",
         default=["agentview_image"],
         help="Camera keys to include in video, side-by-side "
-             "(default: agentview_image). "
-             "Use 'both' for agentview_image + robot0_eye_in_hand_image.",
+        "(default: agentview_image). "
+        "Use 'both' for agentview_image + robot0_eye_in_hand_image.",
     )
     parser.add_argument(
         "--delta-actions",
         action="store_true",
         help="Use delta actions instead of absolute target poses "
-             "(sets control_delta=True on the OSC_POSE controller)",
+        "(sets control_delta=True on the OSC_POSE controller)",
     )
     args = parser.parse_args()
 
