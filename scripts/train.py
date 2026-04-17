@@ -103,7 +103,6 @@ TEXT_ENCODER: str | None = "siglip2-base-patch16-224"
 LANG_PROJ_DIM = 256
 FREEZE_VISION_ENCODER = True  # freeze pretrained vision encoder weights
 FREEZE_TEXT_ENCODER = True  # freeze pretrained text encoder weights
-TASK_SUBTASK: str | None = None  # subtask key for nested configs (e.g. LIBERO)
 LANG_DROPOUT_PROB = 0.01  # probability of dropping language conditioning per sample
 
 # Training  hyperparameters
@@ -163,11 +162,8 @@ if __name__ == "__main__":
             all_descriptions: dict = json.load(f)
         entry = all_descriptions.get(desc_key, [])
         if isinstance(entry, dict):
-            if TASK_SUBTASK is not None:
-                task_descriptions = entry.get(TASK_SUBTASK, [])
-            else:
-                # Multi-task: entry maps task language to description lists
-                task_descriptions_by_task = entry if entry else None
+            # Multi-task: entry maps task language to description lists
+            task_descriptions_by_task = entry if entry else None
         elif isinstance(entry, list):
             task_descriptions = entry
         n_descs: int = len(task_descriptions_by_task) if task_descriptions_by_task else len(task_descriptions)
