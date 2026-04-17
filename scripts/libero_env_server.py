@@ -190,7 +190,9 @@ def save_video(
                 continue
             img: np.ndarray = np.flipud(obs[key])
             img = cv2.resize(
-                img, (output_size, output_size), interpolation=cv2.INTER_NEAREST,
+                img,
+                (output_size, output_size),
+                interpolation=cv2.INTER_NEAREST,
             )
             panels.append(img)
         if panels:
@@ -221,8 +223,16 @@ def handle_reset(env, init_state: Optional[np.ndarray] = None) -> Dict[str, Any]
     random one.
     """
     obs: dict = env.reset()
+
     if init_state is not None:
         obs = env.set_init_state(init_state)
+
+    # When env resets (even if we set init state),
+    # objects are dropped unnaturally from some height. Skip these initial frames
+    # by doing nothing.
+    for _ in range(10):
+        obs, _, _, _ = env.step(np.zeros(7))
+
     return {"status": "ok", "obs": obs}
 
 
@@ -312,7 +322,9 @@ def run_session(
             init_state: Optional[np.ndarray] = None
             if init_state_idx is not None:
                 if task_idx not in init_states_cache:
-                    init_states_cache[task_idx] = task_suite.get_task_init_states(task_idx)
+                    init_states_cache[task_idx] = task_suite.get_task_init_states(
+                        task_idx
+                    )
                 task_init_states = init_states_cache[task_idx]
                 num_states: int = len(task_init_states)
                 if init_state_idx < 0 or init_state_idx >= num_states:
@@ -325,7 +337,11 @@ def run_session(
                     continue
                 raw_state = task_init_states[init_state_idx]
                 # get_task_init_states may return a torch.Tensor or np.ndarray
-                init_state = raw_state.numpy() if hasattr(raw_state, "numpy") else np.array(raw_state)
+                init_state = (
+                    raw_state.numpy()
+                    if hasattr(raw_state, "numpy")
+                    else np.array(raw_state)
+                )
 
             # Create or recreate the env when the task changes
             if env is None or task_idx != current_task_idx:
@@ -334,9 +350,7 @@ def run_session(
                 logger.info(
                     f"Loading task {task_idx}: {tasks[task_idx]['description']}"
                 )
-                env = make_libero_env(
-                    tasks[task_idx]["task"], cfg, control_delta
-                )
+                env = make_libero_env(tasks[task_idx]["task"], cfg, control_delta)
                 current_task_idx = task_idx
 
             response = handle_reset(env, init_state)
@@ -380,7 +394,14 @@ def run_session(
     return False, obs_history
 
 
-def run_server(env_key: str, port: int, record: bool, video_dir: str, camera_keys: List[str], control_delta: bool = True) -> None:
+def run_server(
+    env_key: str,
+    port: int,
+    record: bool,
+    video_dir: str,
+    camera_keys: List[str],
+    control_delta: bool = True,
+) -> None:
     """Start the ZMQ REP server and serve environment sessions in a loop."""
     cfg = LIBERO_CONFIGS[env_key]
     image_key: str = cfg.get("image_key", "agentview_image")
@@ -395,12 +416,14 @@ def run_server(env_key: str, port: int, record: bool, video_dir: str, camera_key
     tasks: List[Dict[str, Any]] = []
     for i in range(num_tasks):
         task = task_suite.get_task(i)
-        tasks.append({
-            "idx": i,
-            "name": task.name,
-            "description": get_task_description(task.name),
-            "task": task,
-        })
+        tasks.append(
+            {
+                "idx": i,
+                "name": task.name,
+                "description": get_task_description(task.name),
+                "task": task,
+            }
+        )
     logger.info(f"Loaded {num_tasks} tasks from {cfg['env_name']}:")
     for t in tasks:
         logger.info(f"  [{t['idx']}] {t['description']}")
@@ -430,8 +453,14 @@ def run_server(env_key: str, port: int, record: bool, video_dir: str, camera_key
 
         try:
             should_continue, obs_history = run_session(
-                socket, tasks, task_suite, cfg, control_delta,
-                image_key, record, shutdown,
+                socket,
+                tasks,
+                task_suite,
+                cfg,
+                control_delta,
+                image_key,
+                record,
+                shutdown,
             )
         except zmq.ZMQError as e:
             if e.errno == zmq.ETERM:
@@ -494,14 +523,14 @@ if __name__ == "__main__":
         nargs="+",
         default=["agentview_image"],
         help="Camera keys to include in video, side-by-side "
-             "(default: agentview_image). "
-             "Use 'both' for agentview_image + robot0_eye_in_hand_image.",
+        "(default: agentview_image). "
+        "Use 'both' for agentview_image + robot0_eye_in_hand_image.",
     )
     parser.add_argument(
         "--delta-actions",
         action="store_true",
         help="Use delta actions instead of absolute target poses "
-             "(sets control_delta=True on the OSC_POSE controller)",
+        "(sets control_delta=True on the OSC_POSE controller)",
     )
     args = parser.parse_args()
 
