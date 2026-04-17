@@ -1,3 +1,15 @@
+# ---
+# Generated: 2026-04-06 | claude-opus-4-6
+# Prompt: LIBERO dataset loading with single-task wrappers and multi-task concat
+# Modifications:
+#   2026-04-15 | Prompt: Add description support matching PushT dataset | Added
+#               descriptions and lang_dropout_prob params to LiberoSingleTaskDataset
+#               and get_libero_dataset. __getitem__ now returns a "description" key
+#               with random sampling from per-task description paraphrases and
+#               per-sample language dropout. Falls back to extracted language when
+#               no descriptions are provided.
+# ---
+
 from robomimic.utils.dataset import SequenceDataset
 from torch.utils.data import Dataset, ConcatDataset
 import numpy as np
@@ -66,13 +78,26 @@ def get_hdf5_files_from_folders(folders: List[str]) -> List[str]:
 class LiberoSingleTaskDataset(Dataset):
     """Loads a single LIBERO HDF5 file as a dataset, and adds the language instruction as "language" key in the sample"""
 
-    def __init__(self, hdf5_path, obs_keys, split, seq_length):
+    def __init__(
+        self,
+        hdf5_path: str,
+        obs_keys: tuple[str, ...] | list[str],
+        split: str | None,
+        seq_length: int,
+        descriptions: list[str] | None = None,
+        lang_dropout_prob: float = 0.0,
+    ):
         """
         Args:
             hdf5_path: path to the LIBERO demo HDF5 file.
             obs_keys: observation keys to include (e.g., images, joint/gripper states).
             split: 'train' (demos 0-44), 'test' (demos 45-49), or None (all demos).
             seq_length: number of consecutive timesteps per sample starting from index t.
+            descriptions: optional list of text paraphrases for this task.
+                When provided, each sample randomly selects one description.
+                When None, falls back to the language extracted from the HDF5 filename.
+            lang_dropout_prob: probability of replacing the description with ""
+                per sample, enabling the model to learn an unconditional embedding.
         Returns:
             torch Dataset.
         """
@@ -95,14 +120,24 @@ class LiberoSingleTaskDataset(Dataset):
             load_next_obs=False,
         )
 
-        self.language = extract_language(hdf5_path)
+        self.language: str = extract_language(hdf5_path)
+        self.descriptions: list[str] = descriptions if descriptions else [self.language]
+        self.lang_dropout_prob = lang_dropout_prob
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.dataset)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> dict:
         sample = self.dataset[idx]
         sample["language"] = self.language
+
+        # sample a random task description for text conditioning;
+        # each sample independently has lang_dropout_prob chance of ""
+        desc: str = self.descriptions[np.random.randint(len(self.descriptions))]
+        if np.random.random() < self.lang_dropout_prob:
+            desc = ""
+        sample["description"] = desc
+
         return sample
 
 
@@ -133,15 +168,36 @@ def compute_stats_from_hdf5(hdf5_files, obs_keys):
 
 
 def get_libero_dataset(
-    hdf5_files,
-    obs_keys=("agentview_rgb", "ee_pos", "ee_ori", "gripper_states"),
+    hdf5_files: list[str],
+    obs_keys: tuple[str, ...] | list[str] = ("agentview_rgb", "ee_pos", "ee_ori", "gripper_states"),
     split: Literal["train"] | Literal["test"] | None = None,
-    seq_length=16,
-):
-    datasets = [
-        LiberoSingleTaskDataset(path, obs_keys, split, seq_length)
-        for path in hdf5_files
-    ]
+    seq_length: int = 16,
+    task_descriptions: dict[str, list[str]] | None = None,
+    lang_dropout_prob: float = 0.0,
+) -> ConcatDataset:
+    """Create a ConcatDataset of all LIBERO HDF5 files.
+
+    Args:
+        task_descriptions: optional mapping from task language (as returned by
+            extract_language) to a list of description paraphrases.  When a
+            task's language matches a key, those descriptions are passed to
+            the single-task dataset for random sampling.
+        lang_dropout_prob: per-sample probability of replacing the description
+            with "" for classifier-free guidance training.
+    """
+    datasets: list[LiberoSingleTaskDataset] = []
+    for path in hdf5_files:
+        task_lang: str = extract_language(path)
+        descs: list[str] | None = None
+        if task_descriptions is not None:
+            descs = task_descriptions.get(task_lang)
+        datasets.append(
+            LiberoSingleTaskDataset(
+                path, obs_keys, split, seq_length,
+                descriptions=descs,
+                lang_dropout_prob=lang_dropout_prob,
+            )
+        )
     return ConcatDataset(datasets)
 
 

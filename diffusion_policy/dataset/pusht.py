@@ -1,3 +1,17 @@
+# ---
+# Generated: 2025-01-01 | claude-opus-4-6
+# Prompt: PushTImageDataset and helper functions for loading pusht zarr data
+# Modifications:
+#   2026-04-14 | Prompt: Add text descriptions for diffusion model conditioning | Added descriptions_path param to PushTDataset, loads JSON descriptions and returns a random one per sample in __getitem__
+#   2026-04-14 | Prompt: Accept descriptions list directly | Changed from
+#               descriptions_path to a descriptions list param so the caller
+#               resolves the task from task_descriptions.json.
+#   2026-04-14 | Prompt: Per-sample language dropout | Moved language dropout
+#               from training loop into __getitem__.  With lang_dropout_prob,
+#               individual samples return "" instead of a real description,
+#               letting the model learn an unconditional embedding per-sample.
+# ---
+
 # @markdown ### **Dataset**
 # @markdown
 # @markdown Defines `PushTImageDataset` and helper functions
@@ -11,6 +25,7 @@
 # @markdown  - key `image`: shape (obs_hoirzon, 3, 96, 96)
 # @markdown  - key `agent_pos`: shape (obs_hoirzon, 2)
 # @markdown  - key `action`: shape (pred_horizon, 2)
+# @markdown  - key `description`: a random text description of the task (if descriptions_path provided)
 
 # TODO cleanup code, i just straigth up copied (changed dict names)
 import numpy as np
@@ -86,6 +101,8 @@ class PushTDataset(Dataset):
         pred_horizon: int,
         obs_horizon: int,
         action_horizon: int,
+        descriptions: list[str] | None = None,
+        lang_dropout_prob: float = 0.0,
     ):
 
         # read from zarr dataset
@@ -123,6 +140,9 @@ class PushTDataset(Dataset):
         # images are already normalized
         normalized_train_data["pixels"] = train_image_data
 
+        self.descriptions: list[str] = descriptions or []
+        self.lang_dropout_prob = lang_dropout_prob
+
         self.indices = indices
         self.stats = stats
         self.normalized_train_data = normalized_train_data
@@ -156,4 +176,13 @@ class PushTDataset(Dataset):
         # discard unused observations
         nsample["pixels"] = nsample["pixels"][: self.obs_horizon, :]
         nsample["agent_pos"] = nsample["agent_pos"][: self.obs_horizon, :]
+
+        # sample a random task description for text conditioning;
+        # each sample independently has lang_dropout_prob chance of ""
+        if self.descriptions:
+            desc = self.descriptions[np.random.randint(len(self.descriptions))]
+            if np.random.random() < self.lang_dropout_prob:
+                desc = ""
+            nsample["description"] = desc
+
         return nsample
