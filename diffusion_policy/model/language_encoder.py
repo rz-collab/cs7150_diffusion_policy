@@ -9,6 +9,10 @@
 #               from PRETRAINED_VISION_MODELS (shared with visual_encoder.py).
 #               Supports CLIP and SigLIP family text encoders alongside the
 #               standalone "text" backend.
+#   2026-04-17 | Prompt: Unify encoder base class — LanguageEncoder now inherits
+#               from Encoder (encoder_base.py). Added freeze_backbone() that
+#               freezes self.encoder only, leaving self.proj trainable. __init__
+#               calls freeze_backbone() instead of inlining the parameter loop.
 # ---
 
 import contextlib
@@ -16,6 +20,7 @@ import contextlib
 import torch
 import torch.nn as nn
 
+from diffusion_policy.model.encoder_base import Encoder
 from diffusion_policy.model.visual_encoder import PRETRAINED_VISION_MODELS
 
 # Standalone text encoder (not tied to a vision-language model)
@@ -25,7 +30,7 @@ _TEXT_ENCODER_CONFIG: dict = {
 }
 
 
-class LanguageEncoder(nn.Module):
+class LanguageEncoder(Encoder):
     """Pretrained language encoder with a trainable projection head.
 
     Supports two backends:
@@ -115,8 +120,7 @@ class LanguageEncoder(nn.Module):
 
         # Freeze encoder parameters if requested
         if freeze:
-            for param in self.encoder.parameters():
-                param.requires_grad = False
+            self.freeze_backbone()
 
         # Trainable projection MLP: maps raw encoder dim → proj_dim
         self.proj = nn.Sequential(
@@ -124,6 +128,11 @@ class LanguageEncoder(nn.Module):
             nn.Mish(),
             nn.Linear(proj_dim, proj_dim),
         )
+
+    def freeze_backbone(self) -> None:
+        """Freeze the pretrained language encoder, leaving self.proj trainable."""
+        for param in self.encoder.parameters():
+            param.requires_grad = False
 
     def encode_text(self, texts: list[str], device: torch.device) -> torch.Tensor:
         """Tokenize and encode raw text strings into raw encoder embeddings.

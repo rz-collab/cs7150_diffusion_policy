@@ -31,10 +31,22 @@
 #               to pretrained vision encoders, matching ResNet-18 output dim.
 #               Does not apply to ResNet-18 itself. Legacy checkpoint configs
 #               default to None (no projection) for backwards compatibility.
+#   2026-04-17 | Prompt: Option B freeze_backbone — projection layer should not
+#               freeze with the backbone. Replaced the blanket parameters() loop
+#               with a call to visual_encoder.freeze_backbone() for pretrained
+#               encoders (which only freezes the backbone, not self.proj).
+#               Falls back to freezing all parameters for ResNet-18, which has
+#               no projection layer.
+#   2026-04-17 | Prompt: Update ResNet for VisualEncoder ABC — all encoders now
+#               subclass VisualEncoder. Updated self.visual_encoder type
+#               annotation to VisualEncoder, removed hasattr fallback (ResNet
+#               raises NotImplementedError), and replaced hardcoded ResNet-18
+#               output_dim with self.visual_encoder.output_dim.
 # ---
 
 import torch
 import torch.nn as nn
+from diffusion_policy.model.encoder_base import Encoder
 from diffusion_policy.model.visual_encoder import (
     get_visual_encoder,
     PretrainedVisualEncoder,
@@ -174,7 +186,7 @@ class DiffusionPolicy(nn.Module):
             vis_family: str = vis_config["family"]
 
             if vis_family == "dino":
-                self.visual_encoder: nn.Module = DINOv2VisualEncoder(
+                self.visual_encoder: Encoder = DINOv2VisualEncoder(
                     model_key=vision_encoder,
                     proj_dim=vision_proj_dim,
                 )
@@ -206,11 +218,10 @@ class DiffusionPolicy(nn.Module):
             visual_obs_dim: int = self.visual_encoder.output_dim
         else:
             self.visual_encoder = get_visual_encoder()
-            visual_obs_dim = 512  # ResNet-18 output dim
+            visual_obs_dim = self.visual_encoder.output_dim
 
         if freeze_vision_encoder:
-            for param in self.visual_encoder.parameters():
-                param.requires_grad = False
+            self.visual_encoder.freeze_backbone()
 
         # Diffusion step encoder:
         self.diffusion_step_encoder = DiffusionStepEncoder(diff_step_dim)

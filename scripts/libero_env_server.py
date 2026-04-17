@@ -40,6 +40,14 @@
 #   2026-04-15 | Prompt: Change default to absolute actions | Flipped
 #               --absolute-actions to --delta-actions so the default is absolute
 #               position mode, matching the config values in LIBERO_CONFIGS.
+#   2026-04-17 | Prompt: Fixed initial state support | Added optional init_state_idx
+#               to reset command so client can load a specific fixed initial state
+#               (0–49) from the task's .init file via task_suite.get_task_init_states().
+#               Updated handle_reset to call env.set_init_state() after env.reset(),
+#               added init_states_cache in run_session to avoid redundant disk reads,
+#               added task_suite param to run_session and threaded it through run_server.
+#               Fixed: get_task_init_states returns np.ndarray in this LIBERO version,
+#               not a torch.Tensor; use hasattr guard instead of unconditional .numpy().
 # ---
 
 """
@@ -207,12 +215,21 @@ def save_video(
 # ---------------------------------------------------------------------------
 
 
-def handle_reset(env) -> Dict[str, Any]:
-    """Reset the environment and return the initial observation."""
+def handle_reset(env, init_state: Optional[np.ndarray] = None) -> Dict[str, Any]:
+    """Reset the environment and return the initial observation.
+
+    If init_state is provided, applies it after the standard reset so the
+    environment starts from a specific fixed initial state instead of a
+    random one.
+    """
     obs: dict = env.reset()
 
-    # When env resets, objects are dropped unnaturally from some height.
-    # Skip these frames by doing nothing.
+    if init_state is not None:
+        obs = env.set_init_state(init_state)
+
+    # When env resets (even if we set init state),
+    # objects are dropped unnaturally from some height. Skip these initial frames
+    # by doing nothing.
     for _ in range(10):
         obs, _, _, _ = env.step(np.zeros(7))
 
@@ -250,6 +267,7 @@ def handle_render(last_obs: Optional[dict], image_key: str) -> Dict[str, Any]:
 def run_session(
     socket: zmq.Socket,
     tasks: List[Dict[str, Any]],
+    task_suite,
     cfg: Dict[str, Any],
     control_delta: bool,
     image_key: str,
@@ -267,6 +285,7 @@ def run_session(
     current_task_idx: Optional[int] = None
     last_obs: Optional[dict] = None
     obs_history: List[dict] = []
+    init_states_cache: Dict[int, Any] = {}
 
     while not shutdown.is_set():
         if not socket.poll(timeout=1000):
@@ -297,6 +316,33 @@ def run_session(
                 socket.send(pickle.dumps(response))
                 continue
 
+            init_state_idx: Optional[int] = request.get("init_state_idx")
+
+            # Load and cache init states if a specific state is requested
+            init_state: Optional[np.ndarray] = None
+            if init_state_idx is not None:
+                if task_idx not in init_states_cache:
+                    init_states_cache[task_idx] = task_suite.get_task_init_states(
+                        task_idx
+                    )
+                task_init_states = init_states_cache[task_idx]
+                num_states: int = len(task_init_states)
+                if init_state_idx < 0 or init_state_idx >= num_states:
+                    response = {
+                        "status": "error",
+                        "message": f"Invalid init_state_idx {init_state_idx}. "
+                        f"Must be 0–{num_states - 1}.",
+                    }
+                    socket.send(pickle.dumps(response))
+                    continue
+                raw_state = task_init_states[init_state_idx]
+                # get_task_init_states may return a torch.Tensor or np.ndarray
+                init_state = (
+                    raw_state.numpy()
+                    if hasattr(raw_state, "numpy")
+                    else np.array(raw_state)
+                )
+
             # Create or recreate the env when the task changes
             if env is None or task_idx != current_task_idx:
                 if env is not None:
@@ -307,7 +353,7 @@ def run_session(
                 env = make_libero_env(tasks[task_idx]["task"], cfg, control_delta)
                 current_task_idx = task_idx
 
-            response = handle_reset(env)
+            response = handle_reset(env, init_state)
             last_obs = response.get("obs")
             if record and last_obs is not None:
                 obs_history.append(last_obs)
@@ -409,6 +455,7 @@ def run_server(
             should_continue, obs_history = run_session(
                 socket,
                 tasks,
+                task_suite,
                 cfg,
                 control_delta,
                 image_key,
