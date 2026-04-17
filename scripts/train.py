@@ -91,17 +91,6 @@ DATASET_PATH = os.path.join("data", "pusht_cchi_v7_replay.zarr.zip")
 MODEL_SAVE_DIR = "ckpts"
 MODEL_LOAD_PATH = None
 
-# Model hyperparameters
-# |o|o|                             observations: 2
-# | |a|a|a|a|a|a|a|a|               actions executed: 8
-# |p|p|p|p|p|p|p|p|p|p|p|p|p|p|p|p| actions predicted: 16
-OBS_HORIZON = 2
-ACTION_EXEC_HORIZON = 8
-ACTION_PRED_HORIZON = 16
-NUM_DIFFUSION_STEPS_IN_TRAINING = 100
-ACTION_DIM = 2
-STATE_OBS_DIM = 2
-
 # Encoder settings
 # Vision: model key from PRETRAINED_VISION_MODELS, or None for ResNet-18
 #   Options: "clip-vit-b-16", "siglip-base-patch16-224", "siglip2-base-patch16-224",
