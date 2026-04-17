@@ -478,7 +478,7 @@ if __name__ == "__main__":
         help="Show a live pygame window during inference",
     )
     parser.add_argument(
-        "--task",
+        "--task-description",
         type=str,
         default=None,
         help="Task description for language-conditioned models",
