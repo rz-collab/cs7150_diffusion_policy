@@ -120,9 +120,7 @@ def preprocess_state_libero(obs: dict, stats: dict) -> np.ndarray:
     return np.concatenate([ee_pos, ee_quat, gripper])
 
 
-def denormalize_actions_libero(
-    pred_actions: torch.Tensor, stats: dict
-) -> np.ndarray:
+def denormalize_actions_libero(pred_actions: torch.Tensor, stats: dict) -> np.ndarray:
     """Convert 10D model output back to 7D LIBERO env actions.
 
     Model outputs: [pos_norm(3), rot_6d(6), gripper_norm(1)]
@@ -224,7 +222,7 @@ def run_inference(
     # representation (Zhou et al.).  The checkpoint's model_config may
     # still contain the raw env values, so apply the same overrides here.
     if env_key == "libero":
-        model_config["action_dim"] = 3 + 6 + 1   # pos + rot_6d + gripper
+        model_config["action_dim"] = 3 + 6 + 1  # pos + rot_6d + gripper
         model_config["state_obs_dim"] = 3 + 4 + 2  # ee_pos + quat + gripper
 
     # Convert old encoder_type-based configs to vision/text_encoder style
@@ -285,9 +283,7 @@ def run_inference(
             task_idx = selected["idx"]
         if task_description is None:
             task_description = selected["description"]
-        logger.info(
-            f"Task {task_idx}: {task_description}"
-        )
+        logger.info(f"Task {task_idx}: {task_description}")
         obs: dict = env.reset(task_idx=task_idx)
     else:
         # PushT: pick a random description from the JSON file
@@ -416,9 +412,7 @@ def run_inference(
                                 np.transpose(render_img, (1, 0, 2))
                             )
                             screen.blit(
-                                pygame.transform.scale(
-                                    surf, (vis_size, vis_size)
-                                ),
+                                pygame.transform.scale(surf, (vis_size, vis_size)),
                                 (0, 0),
                             )
                             pygame.display.flip()
@@ -460,7 +454,8 @@ if __name__ == "__main__":
         help="Environment config key (default: pusht). See env_config.py for options.",
     )
     parser.add_argument(
-        "--checkpoint", "--ckpt",
+        "--checkpoint",
+        "--ckpt",
         type=str,
         default=None,
         help="Path to model checkpoint (overrides default)",
@@ -496,7 +491,7 @@ if __name__ == "__main__":
     run_inference(
         env_key=args.env,
         output_video_path=args.save_video,
-        task_description=args.task,
+        task_description=args.task_description,
         task_idx=args.task_idx,
         display=args.display,
     )
