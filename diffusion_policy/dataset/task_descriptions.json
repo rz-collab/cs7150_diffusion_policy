@@ -506,5 +506,6 @@
             "Place the black bowl inside the cabinet's bottom drawer, then close the drawer to finish the task.",
             "The robot performs two actions: placing the black bowl into the bottom drawer of the cabinet, and then closing that drawer."
         ]
-    }
+    },
+    "libero_90": {}
 }
