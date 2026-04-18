@@ -79,6 +79,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import zmq
+import robosuite.utils.transform_utils as T
 
 logging.basicConfig(
     level=logging.INFO, format="[%(asctime)s] [%(levelname)s] %(message)s"
@@ -139,8 +140,16 @@ def get_task_description(task_name: str) -> str:
     return name.replace("_", " ")
 
 
-def make_libero_env(task, cfg: Dict[str, Any], control_delta: bool = True):
-    """Create a LIBERO OffScreenRenderEnv for a specific task object."""
+def make_libero_env(task, cfg: Dict[str, Any]):
+    """Create a LIBERO OffScreenRenderEnv for a specific task object.
+
+    Always constructed with control_delta=True (delta mode) regardless of the
+    control_delta argument.  handle_reset switches to absolute mode after the
+    warmup by setting robot.controller.use_delta=False directly.  Creating with
+    control_delta=False changes internal controller gain/bound parameters that
+    cause instability when use_delta is later flipped at runtime; always using
+    delta-mode construction (as eval_libero_abs_action does) avoids this.
+    """
     from libero.libero import get_libero_path
     from libero.libero.envs import OffScreenRenderEnv
 
@@ -151,7 +160,7 @@ def make_libero_env(task, cfg: Dict[str, Any], control_delta: bool = True):
         bddl_file_name=bddl_file,
         camera_heights=cfg["image_size"],
         camera_widths=cfg["image_size"],
-        control_delta=control_delta,
+        control_delta=True,
     )
 
 
@@ -215,25 +224,58 @@ def save_video(
 # ---------------------------------------------------------------------------
 
 
-def handle_reset(env, init_state: Optional[np.ndarray] = None) -> Dict[str, Any]:
+def _patch_eef_obs(env, obs: dict) -> dict:
+    """Replace robot0_eef_pos/quat with the gripper0_grip_site values.
+    This makes obs["robot0_eef_quat"] match with controller.ee_ori_mat
+    in terms of orientation.
+
+    robosuite 1.4.1 reports robot0_eef_quat from a fingertip site whose
+    orientation frame differs from the OSC_POSE controller's tracked body
+    (robot0_right_hand) by a configuration-dependent rotation.  Sending
+    the observable quaternion as an absolute orientation target therefore
+    causes ~45° drift (see https://github.com/ARISE-Initiative/robosuite/issues/615).
+    This is fixed in robosuite 1.5.0.  Until we upgrade, we patch the
+    observation by reading gripper0_grip_site, which shares the same
+    orientation frame as the controller.
+    """
+    site_id = env.env.sim.model.site_name2id("gripper0_grip_site")
+    obs["robot0_eef_pos"] = env.env.sim.data.site_xpos[site_id].copy()
+    obs["robot0_eef_quat"] = T.mat2quat(
+        env.env.sim.data.site_xmat[site_id].reshape(3, 3)
+    )
+    return obs
+
+
+def handle_reset(
+    env,
+    init_state: Optional[np.ndarray] = None,
+    control_delta: bool = False,
+) -> Dict[str, Any]:
     """Reset the environment and return the initial observation.
 
     If init_state is provided, applies it after the standard reset so the
     environment starts from a specific fixed initial state instead of a
     random one.
+
+    The env is always constructed with control_delta=True to skip first few frames
+    right after reset by inputting zero relative action, then set to the passed
+    control_delta.
     """
     obs: dict = env.reset()
 
     if init_state is not None:
         obs = env.set_init_state(init_state)
 
-    # When env resets (even if we set init state),
-    # objects are dropped unnaturally from some height. Skip these initial frames
-    # by doing nothing.
+    # Warmup: let objects settle. Env is constructed in delta mode so zeros = no movement.
     for _ in range(10):
         obs, _, _, _ = env.step(np.zeros(7))
 
-    return {"status": "ok", "obs": obs}
+    # Switch to absolute mode when requested.
+    if not control_delta:
+        for robot in env.env.robots:
+            robot.controller.use_delta = False
+
+    return {"status": "ok", "obs": _patch_eef_obs(env, obs)}
 
 
 def handle_step(env, action: np.ndarray) -> Dict[str, Any]:
@@ -241,7 +283,7 @@ def handle_step(env, action: np.ndarray) -> Dict[str, Any]:
     obs, reward, done, info = env.step(action)
     return {
         "status": "ok",
-        "obs": obs,
+        "obs": _patch_eef_obs(env, obs),
         "reward": float(reward),
         "done": bool(done),
     }
@@ -350,10 +392,11 @@ def run_session(
                 logger.info(
                     f"Loading task {task_idx}: {tasks[task_idx]['description']}"
                 )
-                env = make_libero_env(tasks[task_idx]["task"], cfg, control_delta)
+                env = make_libero_env(tasks[task_idx]["task"], cfg)
+
                 current_task_idx = task_idx
 
-            response = handle_reset(env, init_state)
+            response = handle_reset(env, init_state, control_delta=control_delta)
             last_obs = response.get("obs")
             if record and last_obs is not None:
                 obs_history.append(last_obs)

@@ -70,7 +70,8 @@ conda activate libero
 python scripts/libero_env_server.py --env libero_goal --save-video
 ```
 
-
+## blabal
+python scripts/inference.py --save-video libero_test.mp4 --env libero --checkpoint ckpts/libero_epoch_19_20260417_151825_model.pth --task-idx 3
 
 
 

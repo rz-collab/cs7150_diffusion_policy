@@ -63,11 +63,14 @@ import time
 from datetime import datetime
 import argparse
 
+
 class TqdmLoggingHandler(logging.StreamHandler):
     """Routes log output through tqdm.write so progress bars aren't broken."""
+
     def emit(self, record: logging.LogRecord) -> None:
         msg: str = self.format(record)
         tqdm.write(msg)
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -95,21 +98,21 @@ MODEL_LOAD_PATH = None
 # Vision: model key from PRETRAINED_VISION_MODELS, or None for ResNet-18
 #   Options: "clip-vit-b-16", "siglip-base-patch16-224", "siglip2-base-patch16-224",
 #            "dinov2-small", "dinov2-base", "dinov2-large", None
-VISION_ENCODER: str | None = "dinov2-small"
+VISION_ENCODER: str | None = None
 # Text: model key for clip/siglip text encoder, "text" for standalone, or None for no language
 #   Options: "clip-vit-b-16", "siglip-base-patch16-224", "siglip2-base-patch16-224",
 #            "text", None
-TEXT_ENCODER: str | None = "siglip2-base-patch16-224"
+TEXT_ENCODER: str | None = None
 LANG_PROJ_DIM = 256
-FREEZE_VISION_ENCODER = True  # freeze pretrained vision encoder weights
-FREEZE_TEXT_ENCODER = True  # freeze pretrained text encoder weights
+FREEZE_VISION_ENCODER = False  # freeze pretrained vision encoder weights
+FREEZE_TEXT_ENCODER = False  # freeze pretrained text encoder weights
 LANG_DROPOUT_PROB = 0.01  # probability of dropping language conditioning per sample
 
 # Training  hyperparameters
 WEIGHT_DECAY = 1e-6
 LR = 1e-4
-BATCH_SIZE = 128
-NUM_EPOCHS = 30
+BATCH_SIZE = 64
+NUM_EPOCHS = 10
 GRAD_CLIP_NORM = 1.0
 NUM_WARMUP_STEPS = 500
 
@@ -166,7 +169,11 @@ if __name__ == "__main__":
             task_descriptions_by_task = entry if entry else None
         elif isinstance(entry, list):
             task_descriptions = entry
-        n_descs: int = len(task_descriptions_by_task) if task_descriptions_by_task else len(task_descriptions)
+        n_descs: int = (
+            len(task_descriptions_by_task)
+            if task_descriptions_by_task
+            else len(task_descriptions)
+        )
         logger.info(f"Loaded {n_descs} description entries for {desc_key}")
 
     # === Data ===
@@ -210,7 +217,7 @@ if __name__ == "__main__":
         train_ds = get_libero_dataset(
             hdf5_files=hdf5_files,
             obs_keys=obs_keys,
-            split="train",
+            split=None,  # use all 50 demonstrations
             seq_length=cfg["action_pred_horizon"],
             task_descriptions=task_descriptions_by_task,
             lang_dropout_prob=LANG_DROPOUT_PROB,
@@ -375,7 +382,9 @@ if __name__ == "__main__":
             # Periodic checkpoint saving
             if (epoch_idx + 1) % CHECKPOINT_INTERVAL == 0:
                 _stats = data_stats_np if ENV == "libero" else None
-                save_checkpoint(diff_model, ema, epoch_idx, MODEL_SAVE_DIR, ENV, data_stats=_stats)
+                save_checkpoint(
+                    diff_model, ema, epoch_idx, MODEL_SAVE_DIR, ENV, data_stats=_stats
+                )
 
         end_time = time.perf_counter()
         logger.info(f"Training complete. Took {end_time - start_time:.2f}s")
@@ -385,5 +394,7 @@ if __name__ == "__main__":
     finally:
         # Save model parameters (EMA) either when interrupted or training done.
         _stats = data_stats_np if ENV == "libero" else None
-        save_checkpoint(diff_model, ema, epoch_idx, MODEL_SAVE_DIR, ENV, data_stats=_stats)
+        save_checkpoint(
+            diff_model, ema, epoch_idx, MODEL_SAVE_DIR, ENV, data_stats=_stats
+        )
         writer.close()

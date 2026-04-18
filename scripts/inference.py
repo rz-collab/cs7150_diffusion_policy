@@ -105,14 +105,16 @@ def extract_state(obs: dict[str, np.ndarray], state_keys: list[str]) -> np.ndarr
 def preprocess_state_libero(obs: dict, stats: dict) -> np.ndarray:
     """Normalize LIBERO observation state to match training preprocessing.
 
-    Training normalizes ee_pos and gripper with min-max, and converts
-    axis-angle orientation to quaternion.  The env already provides
-    quaternion orientation (robot0_eef_quat), so it is used directly.
+    robot0_eef_quat is patched by the server to use gripper0_grip_site
+    (matching the controller frame; see libero_env_server._patch_eef_obs).
+    T.mat2quat returns [x,y,z,w]; training used RotationUtils.axis_angle_to_quaternion
+    which returns [w,x,y,z], so we reorder here.
     """
     ee_pos: np.ndarray = normalize_data(
         np.asarray(obs["robot0_eef_pos"]).flatten(), stats["obs"]["ee_pos"]
     )
-    ee_quat: np.ndarray = np.asarray(obs["robot0_eef_quat"]).flatten()
+    q = np.asarray(obs["robot0_eef_quat"]).flatten()  # [x,y,z,w] from T.mat2quat
+    ee_quat: np.ndarray = np.array([q[3], q[0], q[1], q[2]])  # reorder to [w,x,y,z]
     gripper: np.ndarray = normalize_data(
         np.asarray(obs["robot0_gripper_qpos"]).flatten(),
         stats["obs"]["gripper_states"],

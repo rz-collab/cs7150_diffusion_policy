@@ -39,22 +39,33 @@ def get_env_and_metadata(suite_name, task_name):
 
 
 def convert_demo_to_abs(env, init_states, actions):
-    """Step through env with delta actions, read absolute goal pos/ori."""
+    """Step through env with delta actions, read absolute goal pos/ori and ctrl-frame ee_ori."""
     env.reset()
     env.set_init_state(init_states)
 
     for _ in range(10):
         env.step(np.array([0, 0, 0, 0, 0, 0, -1]))
 
+    eff_site_name = "gripper0_grip_site"
+
     abs_actions = []
+    ee_pos_site = []
+    ee_ori_site = []
     for action in actions:
         obs, reward, done, info = env.step(action)
-        goal_pos = env.env.robots[0].controller.goal_pos
-        goal_ori = T.quat2axisangle(T.mat2quat(env.env.robots[0].controller.goal_ori))
+        ctrl = env.env.robots[0].controller
+        goal_pos = ctrl.goal_pos
+        goal_ori = T.quat2axisangle(T.mat2quat(ctrl.goal_ori))
         gripper = action[-1:]
         abs_actions.append(np.concatenate([goal_pos, goal_ori, gripper]))
 
-    return np.stack(abs_actions)
+        site_id = env.sim.model.site_name2id(eff_site_name)
+        ee_pos_site.append(np.array(env.sim.data.site_xpos[site_id]))
+        ee_ori_site.append(
+            T.quat2axisangle(T.mat2quat(env.sim.data.site_xmat[site_id].reshape(3, 3)))
+        )
+
+    return np.stack(abs_actions), np.stack(ee_pos_site), np.stack(ee_ori_site)
 
 
 def convert_hdf5(input_path, output_path, env):
@@ -69,8 +80,12 @@ def convert_hdf5(input_path, output_path, env):
             states = demo["states"][:]
             actions = demo["actions"][:]
 
-            abs_actions = convert_demo_to_abs(env, states[0], actions)
+            abs_actions, ee_pos_site, ee_ori_site = convert_demo_to_abs(
+                env, states[0], actions
+            )
             out_f[f"data/demo_{i}"]["actions"][:] = abs_actions
+            out_f[f"data/demo_{i}/obs/ee_pos"][:] = ee_pos_site
+            out_f[f"data/demo_{i}/obs/ee_ori"][:] = ee_ori_site
 
 
 if __name__ == "__main__":
@@ -118,6 +133,7 @@ if __name__ == "__main__":
             converted += 1
         except Exception as e:
             print(f"FAILED: {hdf5_file} — {e}")
+            print(e)
             failed += 1
 
     print(f"\nDone. Converted: {converted}, Failed: {failed}")
