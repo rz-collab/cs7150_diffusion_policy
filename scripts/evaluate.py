@@ -1009,9 +1009,10 @@ def main() -> None:
     logger.info(f"Connecting to seen-task server(s): {seen_addresses}")
     seen_envs: list[_EnvWorker] = _make_env_workers(seen_addresses)
 
+    seen_suite: str = cfg["train_task_suite"]
     available_tasks: list[dict] = seen_envs[0].get_tasks()
     for t in available_tasks:
-        t["suite_name"] = cfg["train_task_suite"]
+        t["suite_name"] = seen_suite
     logger.info(f"Tasks ({len(available_tasks)}): {[t['name'] for t in available_tasks]}")
     seen_task_names: list[str] = [t["name"] for t in available_tasks]
 
@@ -1027,7 +1028,6 @@ def main() -> None:
 
     _init_csv(seen_csv, seen_task_names, force=args.restart)
 
-    seen_suite: str = cfg["train_task_suite"]
     seen_rows: list[dict] = [
         build_csv_row(p.name, seen_completed[p.name], seen_task_names, seen_suite, init_states_str)[0]
         for p in ckpt_files
@@ -1035,6 +1035,7 @@ def main() -> None:
     ]
 
     for ckpt_path in ckpt_files:
+        break
         if ckpt_path.name in seen_completed:
             logger.info(f"Skipping {ckpt_path.name} (already evaluated).")
             continue
