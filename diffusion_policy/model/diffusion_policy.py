@@ -42,6 +42,10 @@
 #               annotation to VisualEncoder, removed hasattr fallback (ResNet
 #               raises NotImplementedError), and replaced hardcoded ResNet-18
 #               output_dim with self.visual_encoder.output_dim.
+#   2026-04-18 | Prompt: Fix AttributeError on SiglipModel.visual_projection |
+#               Used getattr(..., None) when passing visual_projection in the
+#               shared-weights branch so SigLIP (which has no projection layer)
+#               falls through to the nn.Identity() fallback in PretrainedVisualEncoder.
 # ---
 
 import torch
@@ -205,7 +209,7 @@ class DiffusionPolicy(nn.Module):
                 self.visual_encoder = PretrainedVisualEncoder(
                     model_key=vision_encoder,
                     vision_model=full_model.vision_model,
-                    visual_projection=full_model.visual_projection,
+                    visual_projection=getattr(full_model, "visual_projection", None),
                     proj_dim=vision_proj_dim,
                 )
                 shared_text_model = full_model.text_model
