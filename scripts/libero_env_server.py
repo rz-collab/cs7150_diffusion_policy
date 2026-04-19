@@ -67,6 +67,11 @@
 #               in __main__ only when LIBERO_WORKER env var is not set, so multi-server
 #               children (which inherit LIBERO_WORKER=1) stay silent. Task-load log
 #               line now shows [suite:idx] so it's clear which suite is active.
+#   2026-04-19 | Prompt: Update env name to the one set by connecting client | When a
+#               client reset switches suite_name, run_session now also updates cfg and
+#               image_key to match the new suite's LIBERO_CONFIGS entry. run_session
+#               return type extended to include final suite name; run_server uses it
+#               as env_key in save_video so videos are tagged with the active suite.
 # ---
 
 """
@@ -362,13 +367,13 @@ def run_session(
     image_key: str,
     record: bool,
     shutdown: threading.Event,
-) -> Tuple[bool, List[dict]]:
+) -> Tuple[bool, List[dict], str]:
     """Run a single client session.
 
     The environment is created lazily when the client sends a "reset" with
     a task_idx, and recreated if the task_idx or suite_name changes.
 
-    Returns (should_continue, obs_history).
+    Returns (should_continue, obs_history, final_suite_name).
     """
     current_suite_name: str = cfg["env_name"]
     task_suite, tasks = suite_cache[current_suite_name]
@@ -409,6 +414,8 @@ def run_session(
                     suite_cache[suite_name] = _load_task_suite(suite_name)
                 task_suite, tasks = suite_cache[suite_name]
                 current_suite_name = suite_name
+                cfg = LIBERO_CONFIGS[suite_name]
+                image_key = cfg.get("image_key", "agentview_image")
                 init_states_cache.clear()
                 if env is not None:
                     close_env(env)
@@ -492,7 +499,7 @@ def run_session(
             if env is not None:
                 close_env(env)
             socket.send(pickle.dumps({"status": "ok"}))
-            return True, obs_history
+            return True, obs_history, current_suite_name
 
         elif cmd == "ping":
             response = {"status": "ok"}
@@ -505,7 +512,7 @@ def run_session(
     # Clean up on shutdown
     if env is not None:
         close_env(env)
-    return False, obs_history
+    return False, obs_history, current_suite_name
 
 
 def run_server(
@@ -552,7 +559,7 @@ def run_server(
         logger.info(f"Session {session_num}: waiting for client")
 
         try:
-            should_continue, obs_history = run_session(
+            should_continue, obs_history, active_suite = run_session(
                 socket,
                 suite_cache,
                 cfg,
@@ -567,6 +574,7 @@ def run_server(
             logger.error(f"ZMQ error: {e}")
             should_continue = False
             obs_history = []
+            active_suite = env_key
         except Exception as e:
             logger.error(f"Session error: {e}", exc_info=True)
             try:
@@ -575,10 +583,11 @@ def run_server(
                 pass
             should_continue = True
             obs_history = []
+            active_suite = env_key
 
         # Save video if recording was enabled and frames were collected
         if record and obs_history:
-            save_video(obs_history, video_dir, env_key, camera_keys)
+            save_video(obs_history, video_dir, active_suite, camera_keys)
 
         logger.info(f"Session {session_num}: ended")
 
