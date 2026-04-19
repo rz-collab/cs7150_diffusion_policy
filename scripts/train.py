@@ -90,8 +90,7 @@ ENV = args.env
 cfg = get_env_config(ENV)
 
 # == Training  hyperparameters ==
-DATASET_PATH = os.path.join("data", "pusht_cchi_v7_replay.zarr.zip")
-MODEL_SAVE_DIR = "ckpts"
+MODEL_SAVE_DIR = "ckpts/siglip2_text_and_vision"
 MODEL_LOAD_PATH = None
 
 # Encoder settings
@@ -120,7 +119,7 @@ NUM_WARMUP_STEPS = 500
 MODEL_SAVE_DIR = "ckpts"
 MODEL_LOAD_PATH = None
 LOG_INTERVAL = 5  # Log every `LOG_INTERVAL` batch
-CHECKPOINT_INTERVAL = 25  # Save checkpoint every `CHECKPOINT_INTERVAL` epochs
+CHECKPOINT_INTERVAL = 5  # Save checkpoint every `CHECKPOINT_INTERVAL` epochs
 
 
 def save_checkpoint(diff_model, ema, epoch_idx, save_dir, env_name, data_stats=None):
