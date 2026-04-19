@@ -61,7 +61,7 @@ ENV_CONFIGS = {
         "state_keys": ["robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos"],
         "gym_api": "gym",  # 4-tuple (obs, reward, done, info)
         "zmq_address": "tcp://localhost:5555",
-        "dataset_path": ["data/libero/libero_10"],
+        "dataset_path": ["data/libero_abs/libero_10"],
         "task_descriptions_path": TASK_DESCRIPTIONS_PATH,
         "task_descriptions_key": "libero_10",
         "obs_horizon": 2,
