@@ -29,7 +29,7 @@
 #               cfg["train_task_suite"] on each task dict so seen-task resets switch
 #               to the correct suite at evaluation start.
 #   2026-04-19 | Prompt: Fix stray break halting seen-task loop | Removed erroneous `break` on line 1038 that caused the checkpoint loop to exit immediately without evaluating any checkpoints.
-  2026-04-19 | Prompt: Add suite and init_states columns to CSV | build_csv_row,
+#   2026-04-19 | Prompt: Add suite and init_states columns to CSV | build_csv_row,
 #               write_csv, and _init_csv now accept suite and init_states params
 #               (e.g. "libero_10", "20-39") and write them as the second and third
 #               CSV columns after model. Unseen CSV records the sorted unique suite
