@@ -19,6 +19,10 @@
 #               Task switching forces the server to rebuild a LIBERO env which
 #               exceeded the previous 60s single-timeout budget and tripped
 #               zmq.Again mid-run.
+#   2026-04-19 | Prompt: Add suite_name to reset so one server handles all suites |
+#               Added suite_name param to reset(); when provided, included in the
+#               request so the server can switch to a different task suite before
+#               resetting (requires server-side suite switching support).
 # ---
 
 """
@@ -78,7 +82,7 @@ class RemoteEnv:
         response = self._send({"cmd": "get_tasks"})
         return response["tasks"]
 
-    def reset(self, task_idx: int | None = None, init_state_idx: int | None = None) -> dict:
+    def reset(self, task_idx: int | None = None, init_state_idx: int | None = None, suite_name: str | None = None) -> dict:
         """Reset the remote environment and return the observation dict.
 
         Args:
@@ -86,12 +90,16 @@ class RemoteEnv:
                       If None, reuse the current task (or default to 0).
             init_state_idx: If provided, load this fixed initial state (0–49)
                             from the task's .init file instead of a random one.
+            suite_name: If provided and different from the current suite on the
+                        server, the server switches to that suite before resetting.
         """
         request: dict = {"cmd": "reset"}
         if task_idx is not None:
             request["task_idx"] = task_idx
         if init_state_idx is not None:
             request["init_state_idx"] = init_state_idx
+        if suite_name is not None:
+            request["suite_name"] = suite_name
         response = self._send(request)
         obs: dict = response["obs"]
         return obs

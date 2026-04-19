@@ -290,7 +290,7 @@ def run_inference(
     else:
         # PushT: pick a random description from the JSON file
         desc_path: str = cfg.get("task_descriptions_path", "")
-        desc_key: str = cfg.get("task_descriptions_key", env_key)
+        desc_key: str = cfg.get("train_task_suite", env_key)
         if task_description is None and desc_path and os.path.exists(desc_path):
             with open(desc_path, "r") as f:
                 all_descriptions: dict = json.load(f)
