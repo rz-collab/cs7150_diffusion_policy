@@ -40,6 +40,13 @@
 #   2026-04-15 | Prompt: Change default to absolute actions | Flipped
 #               --absolute-actions to --delta-actions so the default is absolute
 #               position mode, matching the config values in LIBERO_CONFIGS.
+#   2026-04-18 | Prompt: Kill stale processes before binding | run_multi_server now calls
+#               lsof to find and kill any processes bound to the target ports before
+#               spawning child servers, preventing "Address already in use" on restart.
+#   2026-04-18 | Prompt: Multi-server launcher | Added --num-servers N flag that spawns
+#               N server processes on consecutive ports and multiplexes their output
+#               with a color-coded [S0 :5555] prefix so all servers are visible in one
+#               terminal. Ctrl-C cleanly terminates all child processes.
 #   2026-04-17 | Prompt: Fixed initial state support | Added optional init_state_idx
 #               to reset command so client can load a specific fixed initial state
 #               (0–49) from the task's .init file via task_suite.get_task_init_states().
@@ -73,6 +80,8 @@ import os
 import pickle
 import re
 import signal
+import subprocess
+import sys
 import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -534,6 +543,108 @@ def run_server(
     context.term()
 
 
+# ---------------------------------------------------------------------------
+# Multi-server launcher
+# ---------------------------------------------------------------------------
+
+# ANSI color codes for distinguishing server output in the terminal
+_SERVER_COLORS: List[str] = [
+    "\033[36m",  # cyan
+    "\033[33m",  # yellow
+    "\033[35m",  # magenta
+    "\033[32m",  # green
+    "\033[34m",  # blue
+    "\033[31m",  # red
+    "\033[37m",  # white
+    "\033[93m",  # bright yellow
+]
+_RESET: str = "\033[0m"
+
+
+def _stream_server(idx: int, port: int, proc: subprocess.Popen) -> None:
+    """Read a child server's stdout and reprint with a colored prefix."""
+    color: str = _SERVER_COLORS[idx % len(_SERVER_COLORS)]
+    prefix: str = f"{color}[S{idx} :{port}]{_RESET} "
+    for line in proc.stdout:
+        print(f"{prefix}{line}", end="", flush=True)
+
+
+def _kill_port(port: int) -> None:
+    """Kill any process currently bound to the given TCP port (best-effort)."""
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f"tcp:{port}"],
+            capture_output=True, text=True,
+        )
+        pids = result.stdout.strip().split()
+        for pid in pids:
+            if pid:
+                subprocess.run(["kill", pid], check=False)
+                logger.info(f"Killed stale process {pid} on port {port}")
+    except FileNotFoundError:
+        pass  # lsof not available
+
+
+def run_multi_server(args: argparse.Namespace) -> None:
+    """Spawn --num-servers child server processes on consecutive ports.
+
+    Each child runs this same script with --num-servers 1 so they don't
+    recurse. Their stdout is multiplexed into the current terminal with a
+    color-coded prefix so you can watch all servers at once. Ctrl-C shuts
+    everything down cleanly.
+    """
+    # Clear stale processes on the target ports before binding
+    for i in range(args.num_servers):
+        _kill_port(args.port + i)
+
+    processes: List[subprocess.Popen] = []
+    threads: List[threading.Thread] = []
+
+    for i in range(args.num_servers):
+        port: int = args.port + i
+        cmd: List[str] = [
+            sys.executable, __file__,
+            "--env", args.env,
+            "--port", str(port),
+            "--num-servers", "1",
+            "--video-dir", args.video_dir,
+            "--video-cameras", *args.video_cameras,
+        ]
+        if args.save_video:
+            cmd.append("--save-video")
+        if args.delta_actions:
+            cmd.append("--delta-actions")
+
+        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+        )
+        processes.append(proc)
+        logger.info(f"Started server {i} on port {port} (pid {proc.pid})")
+
+        t = threading.Thread(
+            target=_stream_server, args=(i, port, proc), daemon=True
+        )
+        t.start()
+        threads.append(t)
+
+    def _shutdown(_sig: int, _frame) -> None:
+        logger.info("Shutting down all servers...")
+        for p in processes:
+            p.terminate()
+
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+
+    for proc in processes:
+        proc.wait()
+    logger.info("All servers stopped.")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="LIBERO environment ZMQ server")
     parser.add_argument(
@@ -575,17 +686,28 @@ if __name__ == "__main__":
         help="Use delta actions instead of absolute target poses "
         "(sets control_delta=True on the OSC_POSE controller)",
     )
+    parser.add_argument(
+        "--num-servers",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Spawn N servers on consecutive ports starting at --port (default: 1). "
+             "Output from all servers is multiplexed with a color-coded prefix.",
+    )
     args = parser.parse_args()
 
     # Shorthand: --video-cameras both
     if args.video_cameras == ["both"]:
         args.video_cameras = ["agentview_image", "robot0_eye_in_hand_image"]
 
-    run_server(
-        env_key=args.env,
-        port=args.port,
-        record=args.save_video,
-        video_dir=args.video_dir,
-        camera_keys=args.video_cameras,
-        control_delta=args.delta_actions,
-    )
+    if args.num_servers > 1:
+        run_multi_server(args)
+    else:
+        run_server(
+            env_key=args.env,
+            port=args.port,
+            record=args.save_video,
+            video_dir=args.video_dir,
+            camera_keys=args.video_cameras,
+            control_delta=args.delta_actions,
+        )

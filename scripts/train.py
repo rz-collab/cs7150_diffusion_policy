@@ -90,37 +90,35 @@ ENV = args.env
 cfg = get_env_config(ENV)
 
 # == Training  hyperparameters ==
-DATASET_PATH = os.path.join("data", "pusht_cchi_v7_replay.zarr.zip")
-MODEL_SAVE_DIR = "ckpts"
+MODEL_SAVE_DIR = "ckpts/siglip2_text_and_vision"
 MODEL_LOAD_PATH = None
 
 # Encoder settings
 # Vision: model key from PRETRAINED_VISION_MODELS, or None for ResNet-18
 #   Options: "clip-vit-b-16", "siglip-base-patch16-224", "siglip2-base-patch16-224",
 #            "dinov2-small", "dinov2-base", "dinov2-large", None
-VISION_ENCODER: str | None = None
+VISION_ENCODER: str | None = "siglip2-base-patch16-224"
 # Text: model key for clip/siglip text encoder, "text" for standalone, or None for no language
 #   Options: "clip-vit-b-16", "siglip-base-patch16-224", "siglip2-base-patch16-224",
 #            "text", None
-TEXT_ENCODER: str | None = None
+TEXT_ENCODER: str | None = "siglip2-base-patch16-224"
 LANG_PROJ_DIM = 256
-FREEZE_VISION_ENCODER = False  # freeze pretrained vision encoder weights
-FREEZE_TEXT_ENCODER = False  # freeze pretrained text encoder weights
-LANG_DROPOUT_PROB = 0.01  # probability of dropping language conditioning per sample
+FREEZE_VISION_ENCODER = True  # freeze pretrained vision encoder weights
+FREEZE_TEXT_ENCODER = True  # freeze pretrained text encoder weights
+LANG_DROPOUT_PROB = 0  # probability of dropping language conditioning per sample
 
 # Training  hyperparameters
 WEIGHT_DECAY = 1e-6
 LR = 1e-4
 BATCH_SIZE = 64
-NUM_EPOCHS = 10
+NUM_EPOCHS = 50
 GRAD_CLIP_NORM = 1.0
 NUM_WARMUP_STEPS = 500
 
 # == Other cfg ==
-MODEL_SAVE_DIR = "ckpts"
 MODEL_LOAD_PATH = None
 LOG_INTERVAL = 5  # Log every `LOG_INTERVAL` batch
-CHECKPOINT_INTERVAL = 25  # Save checkpoint every `CHECKPOINT_INTERVAL` epochs
+CHECKPOINT_INTERVAL = 5  # Save checkpoint every `CHECKPOINT_INTERVAL` epochs
 
 
 def save_checkpoint(diff_model, ema, epoch_idx, save_dir, env_name, data_stats=None):
