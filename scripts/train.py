@@ -116,7 +116,6 @@ GRAD_CLIP_NORM = 1.0
 NUM_WARMUP_STEPS = 500
 
 # == Other cfg ==
-MODEL_SAVE_DIR = "ckpts"
 MODEL_LOAD_PATH = None
 LOG_INTERVAL = 5  # Log every `LOG_INTERVAL` batch
 CHECKPOINT_INTERVAL = 5  # Save checkpoint every `CHECKPOINT_INTERVAL` epochs
