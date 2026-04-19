@@ -15,12 +15,65 @@
 #   2026-04-18 | Prompt: Fix progress bar granularity after batching | Switched from
 #               tqdm over batches to tqdm(total=n_episodes) with pbar.update(len(batch))
 #               so the bar still ticks once per episode regardless of batch size.
+#   2026-04-18 | Prompt: Work-queue episode scheduling | Replaced fixed-batch loop with
+#               a queue so envs that finish early immediately reset to the next init
+#               state instead of waiting for batch-mates. Batch size stays at N for
+#               the whole task rather than shrinking at the end.
+#   2026-04-18 | Prompt: Fix ZMQ thread-safety crash | ZMQ sockets must live and be
+#               used in the same thread. Replaced bare RemoteEnv+ThreadPoolExecutor
+#               with _EnvWorker: each env gets a dedicated thread that owns its socket.
+#               Work is submitted via a queue; callers get a Future back. Removed the
+#               ThreadPoolExecutor entirely — _EnvWorker threads provide the parallelism.
 #   2026-04-18 | Prompt: Add batched environment inference | Replaced run_episode
 #               with run_batched_episodes that connects to N servers, resets them
 #               in parallel via ThreadPoolExecutor, stacks observations into a
 #               single (N, ...) batch for one model forward pass, and dispatches
 #               actions back to all envs simultaneously. Added --num-envs arg;
 #               servers are expected on consecutive ports from --zmq-address.
+#   2026-04-18 | Prompt: Fail fast on unreachable env server | _EnvWorker.__init__
+#               now blocks until the worker thread finishes RemoteEnv setup and
+#               re-raises any connection error in the main thread. Previously a
+#               failed ping killed the worker thread silently and the main loop
+#               hung on reset futures that would never complete.
+#   2026-04-18 | Prompt: Bump reset timeout for task switches | Use the new
+#               RemoteEnv ping/op timeout split (ping 60s, ops 600s) and raise
+#               the reset Future timeout from 120s to 600s. Task transitions
+#               force the server to close+rebuild a LIBERO MuJoCo env which
+#               can exceed the old budgets when several servers rebuild at once.
+#   2026-04-18 | Prompt: Graceful env-death handling | run_episodes_queue now
+#               tolerates unresponsive servers: each Future.result call is
+#               wrapped so a timeout or exception marks that env dead (via a
+#               persistent _EnvWorker.dead flag), counts its in-flight episode
+#               as a failure, and lets the remaining live envs continue. Dead
+#               envs stay out of the pool for all subsequent tasks. Timeouts
+#               were tightened to step=30s / reset=300s so hangs are detected
+#               faster now that the run no longer dies on them.
+#   2026-04-18 | Prompt: Retry env-killed episodes, drop from denominator when
+#               unretriable | run_episodes_queue now returns list[Optional[bool]]
+#               where None means the episode never completed because every live
+#               env died before retry could succeed. When an env dies mid-
+#               episode its init_state is pushed back onto the work queue so a
+#               surviving env retries it. evaluate_on_tasks computes the task
+#               success rate over completed episodes only (None entries
+#               excluded from both numerator and denominator) and logs how
+#               many were skipped due to env failures.
+#   2026-04-18 | Prompt: Stop log lines corrupting progress bars | Added
+#               _TqdmLoggingHandler that routes records through tqdm.write,
+#               installed via basicConfig(force=True) so warnings emitted
+#               mid-task (e.g. env death) no longer break the active tqdm bar.
+#   2026-04-18 | Prompt: Save successes/attempts per task | evaluate_on_tasks
+#               now returns {task: {"successes", "attempts"}} instead of just
+#               the rate. CSV columns changed to <task>_successes /
+#               <task>_attempts pairs plus total_successes, total_attempts,
+#               and avg_success_rate (mean of per-task rates, equal-weighted).
+#               New build_csv_row helper flattens the counts for the writer.
+#   2026-04-18 | Prompt: Parallel worker startup with shared deadline |
+#               _EnvWorker.__init__ is now non-blocking; wait_ready(timeout_s)
+#               does the blocking check. _make_env_workers starts all threads
+#               simultaneously then calls wait_ready with a shared deadline so
+#               total startup time = min(all_ready, startup_timeout_s=30s).
+#               Workers that miss the deadline are marked dead and skipped;
+#               evaluation starts immediately with whoever connected.
 # ---
 
 """
@@ -49,8 +102,10 @@ import argparse
 import csv
 import logging
 import os
+import queue as _queue
+import threading
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future as _Future
 from pathlib import Path
 from typing import Optional
 
@@ -84,20 +139,118 @@ UNSEEN_TASKS: list[dict] = [
 logger = logging.getLogger(__name__)
 
 
+class _TqdmLoggingHandler(logging.Handler):
+    """Logging handler that writes through tqdm so log lines don't corrupt
+    any active progress bar."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            tqdm.write(self.format(record))
+            self.flush()
+        except Exception:
+            self.handleError(record)
+
+
 # ---------------------------------------------------------------------------
-# Thread-pool worker helpers — must be top-level to avoid closure captures
+# Thread-safe env proxy
 # ---------------------------------------------------------------------------
 
-def _reset_env(args: tuple) -> dict:
-    """Reset one remote env. Called in a thread pool."""
-    env, task_idx, init_state_idx = args
-    return env.reset(task_idx=task_idx, init_state_idx=init_state_idx)
+class _EnvWorker:
+    """Thread-safe RemoteEnv proxy.
 
+    ZMQ sockets must be created and used in the same thread. This class owns
+    a RemoteEnv in a dedicated background thread and routes all calls through
+    a queue, returning concurrent.futures.Future objects so callers can
+    submit N requests and wait for all N results in parallel.
+    """
 
-def _step_env(args: tuple) -> tuple[dict, float, bool, dict]:
-    """Step one remote env. Called in a thread pool."""
-    env, action = args
-    return env.step(action)
+    _STOP = object()
+
+    def __init__(
+        self,
+        address: str,
+        ping_timeout_ms: int = 60000,
+        op_timeout_ms: int = 600000,
+    ) -> None:
+        self._address: str = address
+        # Persistent health flag — set True by callers (run_episodes_queue) when
+        # this worker stops responding. Once dead, the worker stays out of the
+        # pool for the rest of the run instead of blocking every subsequent call.
+        self.dead: bool = False
+        self._q: _queue.Queue = _queue.Queue()
+        self._ready: threading.Event = threading.Event()
+        self._init_error: Optional[BaseException] = None
+        self._t = threading.Thread(
+            target=self._run, args=(address, ping_timeout_ms, op_timeout_ms),
+            daemon=True, name=f"EnvWorker-{address}",
+        )
+        self._t.start()
+        # Non-blocking: caller must call wait_ready() to check connection status.
+
+    def wait_ready(self, timeout_s: float) -> bool:
+        """Wait up to timeout_s for the background thread to connect.
+
+        Returns True if connected, False if the timeout expired. Raises
+        RuntimeError if the connection attempt failed (e.g. server not running).
+        Marks self.dead=True on any failure so the worker is skipped by
+        run_episodes_queue.
+        """
+        connected: bool = self._ready.wait(timeout=timeout_s)
+        if self._init_error is not None:
+            self.dead = True
+            raise RuntimeError(
+                f"Failed to connect to env server at {self._address}: "
+                f"{self._init_error!r}. "
+                f"Check that a libero_env_server is running on that port."
+            ) from self._init_error
+        if not connected:
+            self.dead = True
+        return connected
+
+    def _run(self, address: str, ping_timeout_ms: int, op_timeout_ms: int) -> None:
+        try:
+            env = RemoteEnv(
+                address=address,
+                ping_timeout_ms=ping_timeout_ms,
+                op_timeout_ms=op_timeout_ms,
+            )
+        except BaseException as exc:
+            self._init_error = exc
+            self._ready.set()
+            return
+        self._ready.set()
+        while True:
+            item = self._q.get()
+            if item is self._STOP:
+                env.close()
+                return
+            method, args, kwargs, fut = item
+            try:
+                fut.set_result(getattr(env, method)(*args, **kwargs))
+            except Exception as exc:
+                fut.set_exception(exc)
+
+    def _submit(self, method: str, *args, **kwargs) -> _Future:
+        """Submit a call and return a Future — does not block."""
+        fut: _Future = _Future()
+        self._q.put((method, args, kwargs, fut))
+        return fut
+
+    def get_tasks(self) -> list[dict]:
+        return self._submit("get_tasks").result(timeout=60.0)
+
+    def reset(self, task_idx: Optional[int] = None, init_state_idx: Optional[int] = None) -> dict:
+        return self._submit("reset", task_idx=task_idx, init_state_idx=init_state_idx).result(timeout=600.0)
+
+    def step(self, action: np.ndarray) -> tuple:
+        return self._submit("step", action).result(timeout=60.0)
+
+    def close(self) -> None:
+        # Don't try to drive a dead worker — its thread is stuck in a broken
+        # recv and would never see the STOP sentinel.
+        if not self.dead:
+            self._q.put(self._STOP)
+            self._t.join(timeout=10.0)
 
 
 # ---------------------------------------------------------------------------
@@ -198,57 +351,159 @@ def denormalize_actions_libero(pred_actions: torch.Tensor, stats: dict) -> np.nd
 
 
 # ---------------------------------------------------------------------------
-# Batched episode runner
+# Batched episode runner with work queue
 # ---------------------------------------------------------------------------
 
-def run_batched_episodes(
-    envs: list[RemoteEnv],
+def _seed_obs_buffers(
+    obs: dict,
+    obs_images: deque,
+    obs_states: deque,
+    cfg: dict,
+    stats: dict,
+) -> None:
+    """Fill an env's obs buffers by repeating its initial observation."""
+    img: np.ndarray = obs[cfg["image_key"]]
+    state: np.ndarray = preprocess_state_libero(obs, stats)
+    obs_images.clear()
+    obs_states.clear()
+    for _ in range(cfg["obs_horizon"]):
+        obs_images.append(img)
+        obs_states.append(state)
+
+
+def run_episodes_queue(
+    envs: list[_EnvWorker],
     model: DiffusionPolicy,
     model_config: dict,
     stats: dict,
     cfg: dict,
     device: torch.device,
     task_idx: int,
-    batch_init_states: list[int],
+    all_init_states: list[int],
     task_description: Optional[str],
     noise_scheduler: DDPMScheduler,
-    executor: ThreadPoolExecutor,
-) -> list[bool]:
-    """Run one episode per env in parallel, returning a success flag for each.
+    pbar: Optional[tqdm] = None,
+    step_timeout_s: float = 30.0,
+    reset_timeout_s: float = 300.0,
+) -> list[Optional[bool]]:
+    """Run all init states using a work queue.
 
-    All envs run the same task but different init states. Observations from all
-    active envs are stacked into a single batch for each model forward pass, so
-    GPU utilization scales with the number of envs rather than being fixed at 1.
+    N envs run in parallel. When an env finishes (success or timeout) it
+    immediately resets to the next init state from the queue rather than waiting
+    for its batch-mates. Batch size stays at N for the whole task, only dropping
+    below N at the very end when the queue empties.
+
+    Fault tolerance: if a server stops responding, the corresponding env is
+    marked dead (envs[i].dead = True) and its in-flight init_state is returned
+    to the queue so a surviving env can retry it. A dead env stays out of the
+    pool for all subsequent tasks. If every live env dies before a retry
+    succeeds, affected episodes are reported as ``None`` in the returned list
+    so the caller can exclude them from the success-rate denominator rather
+    than counting an env-side failure against the model.
     """
     N: int = len(envs)
+    n_total: int = len(all_init_states)
+    # None => episode never completed (excluded from the denominator upstream).
+    results: list[Optional[bool]] = [None] * n_total
 
-    # Reset all envs simultaneously
-    obs_list: list[dict] = list(executor.map(
-        _reset_env,
-        [(env, task_idx, init_state_idx) for env, init_state_idx in zip(envs, batch_init_states)],
-    ))
+    # Queue of (result_idx, init_state_idx) — pop from end for O(1)
+    queue: list[tuple[int, int]] = list(enumerate(all_init_states))
+    queue.reverse()
 
-    # Seed per-env observation buffers with the initial observation
+    # Per-env tracking
+    env_result_idx: list[Optional[int]] = [None] * N
+    env_active: list[bool] = [False] * N
+    env_dead: list[bool] = [e.dead for e in envs]
     obs_images: list[deque] = [deque(maxlen=cfg["obs_horizon"]) for _ in range(N)]
     obs_states: list[deque] = [deque(maxlen=cfg["obs_horizon"]) for _ in range(N)]
-    for i, obs in enumerate(obs_list):
-        img: np.ndarray = obs[cfg["image_key"]]
-        state: np.ndarray = preprocess_state_libero(obs, stats)
-        for _ in range(cfg["obs_horizon"]):
-            obs_images[i].append(img)
-            obs_states[i].append(state)
+    step_counts: list[int] = [0] * N
+    finished: int = 0
+
+    def finish_episode(env_idx: int, success: bool) -> None:
+        """Record a real outcome (policy succeeded or policy failed)."""
+        nonlocal finished
+        ridx: Optional[int] = env_result_idx[env_idx]
+        if ridx is None:
+            return
+        results[ridx] = success
+        env_result_idx[env_idx] = None
+        finished += 1
+        if pbar is not None:
+            pbar.update(1)
+
+    def kill_env(env_idx: int, op: str, exc: BaseException) -> None:
+        """Mark env dead and requeue its in-flight init_state for retry."""
+        if env_dead[env_idx]:
+            return
+        env_dead[env_idx] = True
+        env_active[env_idx] = False
+        envs[env_idx].dead = True  # persist across tasks
+        logger.warning(
+            f"Env {env_idx} ({envs[env_idx]._address}) unresponsive on {op}: "
+            f"{type(exc).__name__}: {exc}. Removing from rotation."
+        )
+        # Push the interrupted init_state back for another env to retry.
+        ridx: Optional[int] = env_result_idx[env_idx]
+        if ridx is not None:
+            queue.append((ridx, all_init_states[ridx]))
+            env_result_idx[env_idx] = None
+
+    def gather_reset(items: list[tuple[int, int]]) -> None:
+        """Submit resets and seed obs for the ones that respond in time."""
+        if not items:
+            return
+        futs = [
+            envs[i]._submit("reset", task_idx=task_idx, init_state_idx=s)
+            for i, s in items
+        ]
+        for (env_idx, _), fut in zip(items, futs):
+            try:
+                obs: dict = fut.result(timeout=reset_timeout_s)
+            except Exception as exc:
+                kill_env(env_idx, op="reset", exc=exc)
+                continue
+            _seed_obs_buffers(obs, obs_images[env_idx], obs_states[env_idx], cfg, stats)
+
+    # Start the first batch of envs, skipping any already-dead ones
+    initial: list[tuple[int, int]] = []
+    for i in range(N):
+        if env_dead[i]:
+            continue
+        if not queue:
+            break
+        result_idx, init_state = queue.pop()
+        env_result_idx[i] = result_idx
+        env_active[i] = True
+        initial.append((i, init_state))
+
+    if not initial:
+        logger.error(
+            f"No live envs available for task {task_idx}; all "
+            f"{n_total} episodes skipped (excluded from success rate)."
+        )
+        return results
+
+    gather_reset(initial)
 
     use_lang: bool = task_description is not None and model.lang_encoder is not None
     max_steps: int = cfg["max_steps"]
-    done: list[bool] = [False] * N
-    success: list[bool] = [False] * N
-    step_counts: list[int] = [0] * N
 
-    while not all(done):
-        active: list[int] = [i for i, d in enumerate(done) if not d]
+    while finished < n_total:
+        active: list[int] = [
+            i for i in range(N) if env_active[i] and not env_dead[i]
+        ]
+        if not active:
+            # Every env has died. Remaining result slots stay None so the
+            # caller excludes them from the success-rate denominator.
+            remaining: int = n_total - finished
+            logger.error(
+                f"All envs dead mid-task; {remaining} remaining "
+                f"episode(s) skipped (excluded from success rate)."
+            )
+            break
         B: int = len(active)
 
-        # Stack observations from active envs into one batch
+        # Build batch from active envs
         images_np: np.ndarray = np.stack([
             np.moveaxis(np.stack(obs_images[i]), -1, 1) / 255.0
             for i in active
@@ -261,11 +516,9 @@ def run_batched_episodes(
         states = torch.from_numpy(states_np).float().to(device)
 
         noisy_actions = torch.randn(
-            (B, cfg["action_pred_horizon"], model_config["action_dim"]),
-            device=device,
+            (B, cfg["action_pred_horizon"], model_config["action_dim"]), device=device
         )
         noise_scheduler.set_timesteps(cfg["num_diffusion_steps"])
-
         task_desc: Optional[list[str]] = [task_description] * B if use_lang else None
 
         with torch.no_grad():
@@ -281,7 +534,6 @@ def run_batched_episodes(
                     noise_pred, t, noisy_actions
                 ).prev_sample
 
-        # Slice action exec window for each active env
         start: int = cfg["obs_horizon"] - 1
         end: int = start + cfg["action_exec_horizon"]
         action_seqs: list[np.ndarray] = [
@@ -289,34 +541,57 @@ def run_batched_episodes(
             for b in range(B)
         ]
 
-        # Execute action sequence, stepping all still-active envs in parallel each tick
+        # Track which envs finish during this action chunk
+        episode_done: list[bool] = [False] * N
+
         for step in range(cfg["action_exec_horizon"]):
             still_active: list[tuple[int, int]] = [
-                (b, i) for b, i in enumerate(active) if not done[i]
+                (b, i) for b, i in enumerate(active)
+                if env_active[i] and not episode_done[i] and not env_dead[i]
             ]
             if not still_active:
                 break
 
-            step_results: list = list(executor.map(
-                _step_env,
-                [(envs[i], action_seqs[b][step]) for b, i in still_active],
-            ))
+            step_futs = [
+                envs[i]._submit("step", action_seqs[b][step])
+                for b, i in still_active
+            ]
+            for (_, i), fut in zip(still_active, step_futs):
+                try:
+                    obs, reward, env_done, _ = fut.result(timeout=step_timeout_s)
+                except Exception as exc:
+                    kill_env(i, op="step", exc=exc)
+                    episode_done[i] = True
+                    continue
 
-            for (b, i), (obs, reward, env_done, _) in zip(still_active, step_results):
                 if reward == 1.0:
-                    success[i] = True
-                    done[i] = True
+                    finish_episode(i, success=True)
+                    episode_done[i] = True
                     continue
 
                 step_counts[i] += 1
                 if env_done or step_counts[i] >= max_steps:
-                    done[i] = True
+                    finish_episode(i, success=False)
+                    episode_done[i] = True
                     continue
 
                 obs_images[i].append(obs[cfg["image_key"]])
                 obs_states[i].append(preprocess_state_libero(obs, stats))
 
-    return success
+        # Envs that finished: assign next init state (only live ones)
+        reassign: list[tuple[int, int]] = []  # (env_idx, next_init_state)
+        for i in [i for i in active if episode_done[i] and not env_dead[i]]:
+            if queue:
+                result_idx, init_state = queue.pop()
+                env_result_idx[i] = result_idx
+                step_counts[i] = 0
+                reassign.append((i, init_state))
+            else:
+                env_active[i] = False
+
+        gather_reset(reassign)
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -327,52 +602,58 @@ def evaluate_on_tasks(
     model: DiffusionPolicy,
     model_config: dict,
     stats: dict,
-    envs: list[RemoteEnv],
+    envs: list[_EnvWorker],
     cfg: dict,
     device: torch.device,
     tasks: list[dict],
     init_state_idxs: range,
     noise_scheduler: DDPMScheduler,
-    executor: ThreadPoolExecutor,
-) -> dict[str, float]:
-    """Evaluate model across all tasks. Returns {task_name: success_rate}."""
-    results: dict[str, float] = {}
-    N: int = len(envs)
-    all_states: list[int] = list(init_state_idxs)
+) -> dict[str, dict[str, int]]:
+    """Evaluate model across all tasks.
 
-    # Split init states into batches of N (last batch may be smaller)
-    batches: list[list[int]] = [
-        all_states[i: i + N] for i in range(0, len(all_states), N)
-    ]
+    Returns {task_name: {"successes": int, "attempts": int}} where attempts
+    excludes episodes that were skipped because every live env died. The
+    success rate is ``successes / attempts`` (caller responsibility).
+    """
+    results: dict[str, dict[str, int]] = {}
+    all_states: list[int] = list(init_state_idxs)
 
     for task_info in tasks:
         task_idx: int = task_info["idx"]
         task_name: str = task_info["name"]
         task_description: Optional[str] = task_info.get("description")
 
-        successes: int = 0
-
         with tqdm(total=len(all_states), desc=f"  {task_name[:40]}", leave=False) as pbar:
-            for batch in batches:
-                batch_results: list[bool] = run_batched_episodes(
-                    envs=envs[: len(batch)],  # trim to actual batch size
-                    model=model,
-                    model_config=model_config,
-                    stats=stats,
-                    cfg=cfg,
-                    device=device,
-                    task_idx=task_idx,
-                    batch_init_states=batch,
-                    task_description=task_description,
-                    noise_scheduler=noise_scheduler,
-                    executor=executor,
-                )
-                successes += sum(batch_results)
-                pbar.update(len(batch))
+            episode_results: list[Optional[bool]] = run_episodes_queue(
+                envs=envs,
+                model=model,
+                model_config=model_config,
+                stats=stats,
+                cfg=cfg,
+                device=device,
+                task_idx=task_idx,
+                all_init_states=all_states,
+                task_description=task_description,
+                noise_scheduler=noise_scheduler,
+                pbar=pbar,
+            )
 
-        rate: float = successes / len(all_states)
-        results[task_name] = rate
-        logger.info(f"  {task_name[:50]}: {rate:.2%} ({successes}/{len(all_states)})")
+        # Episodes that couldn't be measured (all live envs died before retry
+        # succeeded) appear as None. Exclude them from attempts so the rate
+        # reflects policy behavior, not infra failures.
+        completed: list[bool] = [r for r in episode_results if r is not None]
+        skipped: int = len(episode_results) - len(completed)
+        successes: int = sum(completed)
+        attempts: int = len(completed)
+        rate: float = successes / attempts if attempts else 0.0
+        results[task_name] = {"successes": successes, "attempts": attempts}
+        if skipped:
+            logger.warning(
+                f"  {task_name[:50]}: {skipped} episode(s) skipped due to env failures"
+            )
+        logger.info(
+            f"  {task_name[:50]}: {rate:.2%} ({successes}/{attempts})"
+        )
 
     return results
 
@@ -381,9 +662,48 @@ def evaluate_on_tasks(
 # CSV output
 # ---------------------------------------------------------------------------
 
+def build_csv_row(
+    model_name: str, task_results: dict[str, dict[str, int]]
+) -> tuple[dict, float]:
+    """Flatten per-task counts into a CSV row and compute totals.
+
+    Returns (row, avg_rate) where avg_rate is the mean of per-task success
+    rates (equal weight per task). Tasks with 0 attempts contribute 0.0.
+    """
+    row: dict = {"model": model_name}
+    total_successes: int = 0
+    total_attempts: int = 0
+    rate_sum: float = 0.0
+    n_tasks: int = len(task_results)
+
+    for task_name, counts in task_results.items():
+        s: int = counts["successes"]
+        a: int = counts["attempts"]
+        row[f"{task_name}_successes"] = s
+        row[f"{task_name}_attempts"] = a
+        total_successes += s
+        total_attempts += a
+        rate_sum += (s / a) if a else 0.0
+
+    avg_rate: float = rate_sum / n_tasks if n_tasks else 0.0
+    row["total_successes"] = total_successes
+    row["total_attempts"] = total_attempts
+    row["avg_success_rate"] = avg_rate
+    return row, avg_rate
+
+
 def write_csv(output_path: str, rows: list[dict], task_names: list[str]) -> None:
-    """Write a results table to CSV with one row per model."""
-    fieldnames: list[str] = ["model"] + task_names + ["avg_success_rate"]
+    """Write a results table to CSV with one row per model.
+
+    Columns: model, then (<task>_successes, <task>_attempts) pairs per task,
+    then total_successes, total_attempts, and avg_success_rate (mean of the
+    per-task rates).
+    """
+    fieldnames: list[str] = ["model"]
+    for t in task_names:
+        fieldnames.extend([f"{t}_successes", f"{t}_attempts"])
+    fieldnames.extend(["total_successes", "total_attempts", "avg_success_rate"])
+
     with open(output_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -403,6 +723,42 @@ def _make_addresses(base_address: str, n: int) -> list[str]:
     prefix, port_str = base_address.rsplit(":", 1)
     base_port: int = int(port_str)
     return [f"{prefix}:{base_port + i}" for i in range(n)]
+
+
+def _make_env_workers(
+    addresses: list[str],
+    startup_timeout_s: float = 30.0,
+) -> list[_EnvWorker]:
+    """Start all env workers simultaneously and wait with a shared deadline.
+
+    All background threads begin connecting at the same instant. We then call
+    wait_ready() on each with whatever time remains before the shared deadline,
+    so evaluation starts after at most startup_timeout_s regardless of how many
+    servers are slow or absent. Workers that don't respond in time are marked
+    dead and excluded from evaluation.
+    """
+    import time
+
+    workers: list[_EnvWorker] = [_EnvWorker(address=addr) for addr in addresses]
+    deadline: float = time.monotonic() + startup_timeout_s
+
+    for w in workers:
+        remaining: float = max(0.0, deadline - time.monotonic())
+        try:
+            ready: bool = w.wait_ready(remaining)
+            if not ready:
+                logger.warning(
+                    f"Server {w._address} did not respond within "
+                    f"{startup_timeout_s}s — skipping."
+                )
+        except RuntimeError as exc:
+            logger.warning(str(exc))
+
+    live: int = sum(1 for w in workers if not w.dead)
+    logger.info(f"{live}/{len(workers)} server(s) ready.")
+    if live == 0:
+        raise RuntimeError("No env servers responded during startup.")
+    return workers
 
 
 def main() -> None:
@@ -473,9 +829,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.INFO, format="[%(asctime)s] [%(levelname)s] %(message)s"
+    # Route logs through tqdm.write so they don't clobber active progress bars.
+    _handler = _TqdmLoggingHandler()
+    _handler.setFormatter(
+        logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
     )
+    logging.basicConfig(level=logging.INFO, handlers=[_handler], force=True)
 
     # Init state index ranges per mode
     if args.mode == "validate":
@@ -514,94 +873,87 @@ def main() -> None:
         prediction_type="epsilon",
     )
 
-    with ThreadPoolExecutor(max_workers=args.num_envs) as executor:
+    # ------------------------------------------------------------------
+    # Seen task evaluation
+    # ------------------------------------------------------------------
+    seen_addresses: list[str] = _make_addresses(args.zmq_address, args.num_envs)
+    logger.info(f"Connecting to seen-task server(s): {seen_addresses}")
+    seen_envs: list[_EnvWorker] = _make_env_workers(seen_addresses)
 
-        # ------------------------------------------------------------------
-        # Seen task evaluation
-        # ------------------------------------------------------------------
-        seen_addresses: list[str] = _make_addresses(args.zmq_address, args.num_envs)
-        logger.info(f"Connecting to seen-task server(s): {seen_addresses}")
-        seen_envs: list[RemoteEnv] = [RemoteEnv(address=addr) for addr in seen_addresses]
+    available_tasks: list[dict] = seen_envs[0].get_tasks()
+    logger.info(f"Tasks ({len(available_tasks)}): {[t['name'] for t in available_tasks]}")
+    seen_task_names: list[str] = [t["name"] for t in available_tasks]
 
-        available_tasks: list[dict] = seen_envs[0].get_tasks()
-        logger.info(f"Tasks ({len(available_tasks)}): {[t['name'] for t in available_tasks]}")
-        seen_task_names: list[str] = [t["name"] for t in available_tasks]
+    seen_rows: list[dict] = []
+    for ckpt_path in ckpt_files:
+        logger.info(f"--- Evaluating (seen): {ckpt_path.name} ---")
+        model, model_config, stats = load_model(str(ckpt_path), args.env, device)
 
-        seen_rows: list[dict] = []
-        for ckpt_path in ckpt_files:
-            logger.info(f"--- Evaluating (seen): {ckpt_path.name} ---")
-            model, model_config, stats = load_model(str(ckpt_path), args.env, device)
+        task_results: dict[str, dict[str, int]] = evaluate_on_tasks(
+            model=model,
+            model_config=model_config,
+            stats=stats,
+            envs=seen_envs,
+            cfg=cfg,
+            device=device,
+            tasks=available_tasks,
+            init_state_idxs=init_state_idxs,
+            noise_scheduler=noise_scheduler,
+        )
 
-            task_results: dict[str, float] = evaluate_on_tasks(
-                model=model,
-                model_config=model_config,
-                stats=stats,
-                envs=seen_envs,
-                cfg=cfg,
-                device=device,
-                tasks=available_tasks,
-                init_state_idxs=init_state_idxs,
-                noise_scheduler=noise_scheduler,
-                executor=executor,
+        row, avg = build_csv_row(ckpt_path.name, task_results)
+        logger.info(f"{ckpt_path.name} — seen avg success: {avg:.2%}")
+        seen_rows.append(row)
+
+    seen_csv: str = os.path.join(args.output_dir, f"seen_tasks_{args.mode}.csv")
+    write_csv(seen_csv, seen_rows, seen_task_names)
+    for env in seen_envs:
+        env.close()
+
+    # ------------------------------------------------------------------
+    # Unseen task evaluation (test mode only, when flag is set)
+    # ------------------------------------------------------------------
+    if run_eval_on_unseen:
+        if not UNSEEN_TASKS:
+            logger.warning(
+                "UNSEEN_TASKS list is empty — skipping unseen evaluation. "
+                "Populate UNSEEN_TASKS at the top of evaluate.py with the task "
+                "indices and names from the unseen libero server."
             )
+        else:
+            unseen_base: str = args.unseen_zmq_address or args.zmq_address
+            unseen_addresses: list[str] = _make_addresses(unseen_base, args.num_envs)
+            logger.info(f"Connecting to unseen-task server(s): {unseen_addresses}")
+            unseen_envs: list[_EnvWorker] = _make_env_workers(unseen_addresses)
 
-            avg: float = sum(task_results.values()) / len(task_results) if task_results else 0.0
-            logger.info(f"{ckpt_path.name} — seen avg success: {avg:.2%}")
-            seen_rows.append({"model": ckpt_path.name, **task_results, "avg_success_rate": avg})
+            unseen_task_names: list[str] = [t["name"] for t in UNSEEN_TASKS]
+            unseen_rows: list[dict] = []
 
-        seen_csv: str = os.path.join(args.output_dir, f"seen_tasks_{args.mode}.csv")
-        write_csv(seen_csv, seen_rows, seen_task_names)
-        for env in seen_envs:
-            env.close()
+            for ckpt_path in ckpt_files:
+                logger.info(f"--- Evaluating (unseen): {ckpt_path.name} ---")
+                model, model_config, stats = load_model(str(ckpt_path), args.env, device)
 
-        # ------------------------------------------------------------------
-        # Unseen task evaluation (test mode only, when flag is set)
-        # ------------------------------------------------------------------
-        if run_eval_on_unseen:
-            if not UNSEEN_TASKS:
-                logger.warning(
-                    "UNSEEN_TASKS list is empty — skipping unseen evaluation. "
-                    "Populate UNSEEN_TASKS at the top of evaluate.py with the task "
-                    "indices and names from the unseen libero server."
+                task_results = evaluate_on_tasks(
+                    model=model,
+                    model_config=model_config,
+                    stats=stats,
+                    envs=unseen_envs,
+                    cfg=cfg,
+                    device=device,
+                    tasks=UNSEEN_TASKS,
+                    init_state_idxs=init_state_idxs,
+                    noise_scheduler=noise_scheduler,
                 )
-            else:
-                unseen_base: str = args.unseen_zmq_address or args.zmq_address
-                unseen_addresses: list[str] = _make_addresses(unseen_base, args.num_envs)
-                logger.info(f"Connecting to unseen-task server(s): {unseen_addresses}")
-                unseen_envs: list[RemoteEnv] = [
-                    RemoteEnv(address=addr) for addr in unseen_addresses
-                ]
 
-                unseen_task_names: list[str] = [t["name"] for t in UNSEEN_TASKS]
-                unseen_rows: list[dict] = []
+                row, avg = build_csv_row(ckpt_path.name, task_results)
+                logger.info(f"{ckpt_path.name} — unseen avg success: {avg:.2%}")
+                unseen_rows.append(row)
 
-                for ckpt_path in ckpt_files:
-                    logger.info(f"--- Evaluating (unseen): {ckpt_path.name} ---")
-                    model, model_config, stats = load_model(str(ckpt_path), args.env, device)
+            unseen_csv: str = os.path.join(args.output_dir, f"unseen_tasks_{args.mode}.csv")
+            write_csv(unseen_csv, unseen_rows, unseen_task_names)
+            for env in unseen_envs:
+                env.close()
 
-                    task_results = evaluate_on_tasks(
-                        model=model,
-                        model_config=model_config,
-                        stats=stats,
-                        envs=unseen_envs,
-                        cfg=cfg,
-                        device=device,
-                        tasks=UNSEEN_TASKS,
-                        init_state_idxs=init_state_idxs,
-                        noise_scheduler=noise_scheduler,
-                        executor=executor,
-                    )
-
-                    avg = sum(task_results.values()) / len(task_results) if task_results else 0.0
-                    logger.info(f"{ckpt_path.name} — unseen avg success: {avg:.2%}")
-                    unseen_rows.append(
-                        {"model": ckpt_path.name, **task_results, "avg_success_rate": avg}
-                    )
-
-                unseen_csv: str = os.path.join(args.output_dir, f"unseen_tasks_{args.mode}.csv")
-                write_csv(unseen_csv, unseen_rows, unseen_task_names)
-                for env in unseen_envs:
-                    env.close()
 
 
 if __name__ == "__main__":

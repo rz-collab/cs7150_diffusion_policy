@@ -13,6 +13,12 @@
 #   2026-04-17 | Prompt: Fixed initial state support | Added optional init_state_idx
 #               param to reset() so the client can request a specific fixed initial
 #               state (0–49) from the server's .init file for the current task.
+#   2026-04-18 | Prompt: Separate ping and op timeouts | Split timeout_ms into
+#               ping_timeout_ms (default 60s) used only for the startup ping and
+#               op_timeout_ms (default 600s) reapplied to the socket afterwards.
+#               Task switching forces the server to rebuild a LIBERO env which
+#               exceeded the previous 60s single-timeout budget and tripped
+#               zmq.Again mid-run.
 # ---
 
 """
@@ -33,15 +39,25 @@ import zmq
 class RemoteEnv:
     """ZMQ REQ client that proxies env calls to a remote server."""
 
-    def __init__(self, address: str = "tcp://localhost:5555", timeout_ms: int = 30000) -> None:
+    def __init__(
+        self,
+        address: str = "tcp://localhost:5555",
+        ping_timeout_ms: int = 60000,
+        op_timeout_ms: int = 600000,
+    ) -> None:
         self._address = address
         self._context: zmq.Context = zmq.Context()
         self._socket: zmq.Socket = self._context.socket(zmq.REQ)
-        self._socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
-        self._socket.setsockopt(zmq.SNDTIMEO, timeout_ms)
+        # Short timeout for ping so a missing server fails fast at startup.
+        self._socket.setsockopt(zmq.RCVTIMEO, ping_timeout_ms)
+        self._socket.setsockopt(zmq.SNDTIMEO, ping_timeout_ms)
         self._socket.connect(address)
-        # Verify the server is reachable
         self._send({"cmd": "ping"})
+        # Relax timeouts for real operations: rebuilding a LIBERO env on task
+        # switch can easily take longer than a minute when several servers are
+        # loading in parallel.
+        self._socket.setsockopt(zmq.RCVTIMEO, op_timeout_ms)
+        self._socket.setsockopt(zmq.SNDTIMEO, op_timeout_ms)
 
     def _send(self, request: dict) -> dict:
         """Send a request and return the response, raising on errors."""
