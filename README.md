@@ -8,30 +8,40 @@ This repo contains the code for our final project in Deep Learning (CS 7150). Th
 
 We will have two virtual environments, one for diffusion policy and one for LIBERO benchmarks, due to dependencies conflicts.
 
-- Diffusion Policy (our package)
-    - Install torch with the appropriate CUDA version you have (check with `nvcc --version`)
-    - Install package and other dependencies.
-    ```bash
-    conda create -n diff_policy python=3.13.12
-    conda activate diff_policy
-    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-    pip install -e .
-    ```
+### Diffusion Policy (our package)
+- Install torch with the appropriate CUDA version you have (check with `nvcc --version`)
+- Install package and other dependencies.
 
-- LIBERO (optional, only used for inference using LIBERO simulation environment): We follow their exact installation instructions, which we repeat below for convenience
-    ```bash
-    git submodule update --init
-    cd submodules/LIBERO
+```bash
+conda create -n diff_policy python=3.13.12
+conda activate diff_policy
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+pip install -e .
+```
 
-    conda create -n libero python=3.8.13
-    conda activate libero
-    git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git
-    pip install -r requirements.txt
-    pip install torch==1.11.0+cu113 torchvision==0.12.0+cu113 torchaudio==0.11.0 --extra-index-url https://download.pytorch.org/whl/cu113
-    pip install -e .
-    ```
+### LIBERO
 
-## Environment Split: Which Conda Environment for Which Script?
+Note: Optional, only used for inference using LIBERO simulation environment): We follow their exact installation instructions, which we repeat below for convenience.
+
+First get the submodule downloaded.
+```bash
+git submodule update --init
+```
+
+Next is to get everything setup.
+```bash
+cd submodules/LIBERO
+conda create -n libero python=3.8.13
+conda activate libero
+git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git
+pip install -r requirements.txt
+pip install torch==1.11.0+cu113 torchvision==0.12.0+cu113 torchaudio==0.11.0 --extra-index-url https://download.pytorch.org/whl/cu113
+pip install -e .
+```
+
+Now the repo should be fully setup and you are ready to use it with our code.
+
+## Code Overview
 
 ```
 cs7150_diffusion_policy/
@@ -83,30 +93,49 @@ cs7150_diffusion_policy/
 - **(libero env)** = use `conda activate libero` before running
 - Comment after script = key command-line arguments or purpose
 
-## Scripts
+## Datasets
 
-### Downloading PushT Dataset
+There are two main datasets that we use for training our model: PushT and LIBERO.
 
-Unless specified, the default environment is `diff_policy`
+PushT is a dataset we got from the original actions diffusion paper. Its a simple one to use and does not require the LIBERO dataset at all. However, we only use this dataset to prepare for LIBERO and make sure the model was functional before starting on the larger and more complicated LIBERO dataset. To setup and use follow instructions [here](#pusht-dataset-setup).
 
-Download PushT demonstration dataset
+LIBERO is a dataset taken from the LIBERO paper and github. The authors created it to provide a dataset for imitation learning as well as test the models. LIBERO is the main dataset used for our paper, though does require setting up the LIBERO submodule as well as doing more. To setup and use follow instructions [here](#libero-datasets-setup).
+
+### PushT Dataset Setup
+
+Setup is very simple. Unless specified, the default environment is `diff_policy`.
+
+All you need to do for setup is to follow the commands below. This will setup it all for you and no other actions are needed.
 ```bash
 mkdir data
 python scripts/download_pusht_dataset.py
 ```
 
-### Downloading and Preparing LIBERO Datasets
+### LIBERO Datasets Setup
 
-Download LIBERO datasets into `data/libero` folder: \
-You can download them manually from `https://libero-project.github.io/datasets` or using their provided script (requires using `libero` conda environment), which downloads to `libero/datasets`.  Move them to `data/libero`.
+Setting up LIBERO requires a lot more steps. First make sure you have installed the libero submodule and setup the environment using the instructions [here](#libero). Note that this entire repo assumes that you are using the `libero_10` dataset to train the model. This can be modified in the code, however, for simplicity we assume that is the dataset being used. In reality you would want to change the code to use `libero_90` as the training dataset and use the others for validation and testing.
 
-To make diffusion policy use actions = position control instead of velocity, must run this script.  This takes unfortunately 2 minute per task, and we have 130 tasks... This script is adapted from https://github.com/2toinf/X-VLA/blob/main/evaluation/libero/rel2abs.py, you can see explanation here: https://github.com/2toinf/X-VLA/blob/main/evaluation/libero/preprocess.md
+#### Downloading Datasets
+
+To then download the daataset you have two options.
+
+1. Via HuggingFace Website: Download LIBERO datasets into `data/libero` folder: You can download them manually from `https://libero-project.github.io/datasets` or using their provided script (requires using `libero` conda environment), which downloads to `libero/datasets`.  Move them to `data/libero`.
+
+2. Via CLI: To download the LIBERO dataset directly to the `data/libero` folder you can run the following script from inside the LIBERO environment: `python submodules/LIBERO/benchmark_scripts/download_libero_datasets.py --use-huggingface --download-dir data/libero --datasets all`.
+
+Next is to prepare the dataset for the LIBERO model. While you can utalize the dataset as is, in the diffusion paper they found that the model works much better when dealing with absolute positions rather than deltas.
+
+#### Converting to Absolute Position
+
+To make diffusion policy use actions = position control instead of velocity, must run this script. This takes unfortunately 2 minute per task, and we have 130 tasks... This script is adapted from https://github.com/2toinf/X-VLA/blob/main/evaluation/libero/rel2abs.py, you can see explanation here: https://github.com/2toinf/X-VLA/blob/main/evaluation/libero/preprocess.md
 ```bash
 conda activate libero
 python scripts/rel2abs.py --input_dir data/libero/libero_10
 ```
 
-A quick script that verifies it works by simulating absolute actions on the env and compare original video with new video.
+TODO: Continue updating README here.
+
+Next is to verify that the `rel2abs.py` has performed properly. Below is a quick script that verifies it works by simulating absolute actions on the env and compare original video with new video. 
 ```bash
 conda activate libero
 python scripts/compare_actions.py
@@ -158,7 +187,7 @@ Paper Website: [https://diffusion-policy.cs.columbia.edu/](https://diffusion-pol
 
 Notebook Code: [https://colab.research.google.com/drive/18GIHeOQ5DyjMN8iIRZL2EKZ0745NLIpg?usp=sharing#scrollTo=4APZkqh336-M](https://colab.research.google.com/drive/18GIHeOQ5DyjMN8iIRZL2EKZ0745NLIpg?usp=sharing#scrollTo=4APZkqh336-M)
 
-### LIBERO
+### LIBERO Paper
 
 The other Paper used is LIBERO which is a benchmark dataset used for imitation learning in many different tasks. Below are websites linked to it to help with implementation and reference.
 
