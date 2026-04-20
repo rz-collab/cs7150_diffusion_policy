@@ -5,7 +5,13 @@ from libero.libero import benchmark, get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
 import os
 from PIL import Image, ImageDraw
+from pathlib import Path
 
+DATASET_DIR = "data/libero_abs"
+
+TASK_SUITE = "libero_10"
+
+VIDEO_SAVE_DIR = "temp"
 
 def add_text(img, text):
     pil = Image.fromarray(img)
@@ -82,14 +88,25 @@ def verify_abs_actions(suite_name, task_name, abs_hdf5_path, demo_id=0):
         frame = np.concatenate([orig, abs_img], axis=1)
         combined.append(frame)
 
-    imageio.mimsave("verify_side_by_side.mp4", combined, fps=30)
-    print(f"Saved verify_side_by_side.mp4 ({min_len} frames)")
+    save_path = f"{VIDEO_SAVE_DIR}/{task_name}_verify_side_by_side.mp4"
+    imageio.mimsave(save_path, combined, fps=30)
+    print(f"Saved {save_path} ({min_len} frames)")
     print(f"Final reward: {reward}, done: {done}")
 
+# Get Full Path
+target_dir = Path(DATASET_DIR) / TASK_SUITE
 
-verify_abs_actions(
-    suite_name="libero_10",
-    task_name="KITCHEN_SCENE3_turn_on_the_stove_and_put_the_moka_pot_on_it",
-    abs_hdf5_path="data/libero/libero_10_abs/KITCHEN_SCENE3_turn_on_the_stove_and_put_the_moka_pot_on_it_demo.hdf5",
-    demo_id=0,
-)
+# Gets files to verify
+files_to_verify = target_dir.glob("*.hdf5")
+
+# Iterates through those files verifying each of them
+for f in files_to_verify:
+    print(f"Task: {f.stem}")
+    verify_abs_actions(
+        suite_name=TASK_SUITE,
+        # Stem returns just the file name without file extension, and then cut off
+        # last five characters to remove _demo from it, as that is task name
+        task_name=f.stem[:-5],
+        abs_hdf5_path=f,
+        demo_id=0,
+    )
