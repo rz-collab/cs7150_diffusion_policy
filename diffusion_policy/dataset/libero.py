@@ -1,15 +1,3 @@
-# ---
-# Generated: 2026-04-06 | claude-opus-4-6
-# Prompt: LIBERO dataset loading with single-task wrappers and multi-task concat
-# Modifications:
-#   2026-04-15 | Prompt: Add description support matching PushT dataset | Added
-#               descriptions and lang_dropout_prob params to LiberoSingleTaskDataset
-#               and get_libero_dataset. __getitem__ now returns a "description" key
-#               with random sampling from per-task description paraphrases and
-#               per-sample language dropout. Falls back to extracted language when
-#               no descriptions are provided.
-# ---
-
 from robomimic.utils.dataset import SequenceDataset
 from torch.utils.data import Dataset, ConcatDataset
 import numpy as np

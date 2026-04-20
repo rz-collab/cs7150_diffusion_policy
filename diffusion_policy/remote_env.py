@@ -1,30 +1,3 @@
-# ---
-# Generated: 2026-04-14 | claude-opus-4-6
-# Prompt: ZMQ client that wraps a remote LIBERO environment server, providing
-#         the same reset/step/render/close interface so inference code can use
-#         it as a drop-in replacement for a local env.
-# Modifications:
-#   2026-04-14 | Prompt: Fix numpy version mismatch | Convert action to list before
-#               pickling so numpy 2.x arrays don't reference numpy._core when
-#               unpickled by the numpy 1.x server
-#   2026-04-15 | Prompt: Task selection support | Added get_tasks() to query
-#               available tasks from the server, and optional task_idx param
-#               to reset() so the client can choose which task to load.
-#   2026-04-17 | Prompt: Fixed initial state support | Added optional init_state_idx
-#               param to reset() so the client can request a specific fixed initial
-#               state (0–49) from the server's .init file for the current task.
-#   2026-04-18 | Prompt: Separate ping and op timeouts | Split timeout_ms into
-#               ping_timeout_ms (default 60s) used only for the startup ping and
-#               op_timeout_ms (default 600s) reapplied to the socket afterwards.
-#               Task switching forces the server to rebuild a LIBERO env which
-#               exceeded the previous 60s single-timeout budget and tripped
-#               zmq.Again mid-run.
-#   2026-04-19 | Prompt: Add suite_name to reset so one server handles all suites |
-#               Added suite_name param to reset(); when provided, included in the
-#               request so the server can switch to a different task suite before
-#               resetting (requires server-side suite switching support).
-# ---
-
 """
 Remote environment client that communicates with a LIBERO ZMQ server.
 

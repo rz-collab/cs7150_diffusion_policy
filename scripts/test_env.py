@@ -1,21 +1,3 @@
-# ---
-# Generated: 2026-04-14 | claude-opus-4-6
-# Prompt: Test script that connects to an environment and runs random actions
-#         to verify the env setup (including ZMQ bridge for LIBERO) works.
-# Modifications:
-#   2026-04-14 | Prompt: Change LIBERO actions to cover entire area | Replaced random
-#               actions for LIBERO with a systematic sweep that moves the end-effector
-#               through a grid of positions across the workspace, holding orientation
-#               and gripper steady, so the test exercises the full reachable area.
-#   2026-04-14 | Prompt: Cover all rotation angles too | Extended the LIBERO sweep to
-#               also rotate through ±rx, ±ry, ±rz (action dims 3-5) after the
-#               position sweep, so the test covers all 6 DOF of the action space.
-#   2026-04-14 | Prompt: Fix sweep to cover negative directions | Changed sweep to go
-#               negative first for N steps, then positive for 2N steps per axis, so the
-#               arm traverses from negative extreme through start to positive extreme
-#               instead of just going out and back to start.
-# ---
-
 """
 Test an environment by running random actions.
 

@@ -1,20 +1,3 @@
-# ---
-# Generated: 2026-04-14 | claude-opus-4-6
-# Prompt: Create a language encoder module supporting both a pure text encoder
-#         and a CLIP encoder, with configurable projection dimension and freeze
-#         setting, for use as conditioning in the diffusion policy.
-# Modifications:
-#   2026-04-14 | Prompt: Make pretrained model configurable | Replaced hardcoded
-#               CLIP model with a pretrained_model param that looks up the model
-#               from PRETRAINED_VISION_MODELS (shared with visual_encoder.py).
-#               Supports CLIP and SigLIP family text encoders alongside the
-#               standalone "text" backend.
-#   2026-04-17 | Prompt: Unify encoder base class — LanguageEncoder now inherits
-#               from Encoder (encoder_base.py). Added freeze_backbone() that
-#               freezes self.encoder only, leaving self.proj trainable. __init__
-#               calls freeze_backbone() instead of inlining the parameter loop.
-# ---
-
 import contextlib
 
 import torch
