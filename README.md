@@ -1,3 +1,8 @@
+# Exploring Generalization and Multi-Task Learning in Diffusion Policies with Language Conditioning
+
+This repo contains the code for our final project in Deep Learning (CS 7150). The project adapts code from two papers, [Visuomotor Policy Learning via Action Diffusion](https://diffusion-policy.cs.columbia.edu/) ([Repo](https://github.com/real-stanford/diffusion_policy)) and [LIBERO](https://libero-project.github.io/intro.html) ([Repo](https://github.com/Lifelong-Robot-Learning/LIBERO)). For more information on the sources of the code view [Code Source Section](#code-source)
+
+
 
 ## Installation
 
@@ -28,6 +33,8 @@ We will have two virtual environments, one for diffusion policy and one for LIBE
 
 ## Scripts
 
+### Downloading PushT Dataset
+
 Unless specified, the default environment is `diff_policy`
 
 Download PushT demonstration dataset
@@ -35,6 +42,8 @@ Download PushT demonstration dataset
 mkdir data
 python scripts/download_pusht_dataset.py
 ```
+
+### Downloading and Preparing LIBERO Datasets
 
 Download LIBERO datasets into `data/libero` folder: \
 You can download them manually from `https://libero-project.github.io/datasets` or using their provided script (requires using `libero` conda environment), which downloads to `libero/datasets`.  Move them to `data/libero`.
@@ -51,6 +60,11 @@ conda activate libero
 python scripts/compare_actions.py
 ```
 
+#### Libero Dataset Notes
+- They use `Panda` robot model that has 7 revolution joints (`joint_states` dimension is 7) and a gripper of 2 DoF (fingers positions but they're symmetric, so in action space it's just one dimension).
+The action dimension is 7: (px,py,pz,rx,ry,rz,gripper) and they're relative pose command (called `OSC_POSE` controller type in robosuite)
+
+### Training Models
 Train
 ```bash
 python scripts/train.py --env libero
@@ -73,11 +87,6 @@ python scripts/libero_env_server.py --env libero_goal --save-video
 ## blabal
 python scripts/inference.py --save-video libero_test.mp4 --env libero --checkpoint ckpts/libero_epoch_19_20260417_151825_model.pth --task-idx 3
 
-
-
-## Libero Dataset Notes
-- They use `Panda` robot model that has 7 revolution joints (`joint_states` dimension is 7) and a gripper of 2 DoF (fingers positions but they're symmetric, so in action space it's just one dimension).
-The action dimension is 7: (px,py,pz,rx,ry,rz,gripper) and they're relative pose command (called `OSC_POSE` controller type in robosuite)
 
 
 
@@ -104,7 +113,7 @@ The other Paper used is LIBERO which is a benchmark dataset used for imitation l
 Dataset Website: [https://libero-project.github.io/main.html](https://libero-project.github.io/main.html)
 
 #### Downloading LIBERO and Datasets
-To download libero you run the commands as follows. First you need to add the submodule.
+To download libero you run the commands as follows. First you need to add the submodule. The submodule while originates from their repo, its a fork with small changes we made to make it work better with our environment.
 
 Add the submodule with the following command:
 ```bash
