@@ -19,7 +19,7 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 pip install -e .
 ```
 
-### LIBERO
+### LIBERO Repo and Environment
 
 Note: Optional, only used for inference using LIBERO simulation environment): We follow their exact installation instructions, which we repeat below for convenience.
 
@@ -113,7 +113,7 @@ python scripts/download_pusht_dataset.py
 
 ### LIBERO Datasets Setup
 
-Setting up LIBERO requires a lot more steps. First make sure you have installed the libero submodule and setup the environment using the instructions [here](#libero). Note that this entire repo assumes that you are using the `libero_10` dataset to train the model. This can be modified in the code, however, for simplicity we assume that is the dataset being used. In reality you would want to change the code to use `libero_90` as the training dataset and use the others for validation and testing.
+Setting up LIBERO requires a lot more steps. First make sure you have installed the libero submodule and setup the environment using the LIBERO instructions in the [install section](#libero-repo-and-environment). Note that this entire repo assumes that you are using the `libero_10` dataset to train the model. This can be modified in the code, however, for simplicity we assume that is the dataset being used. In reality you would want to change the code to use `libero_90` as the training dataset and use the others for validation and testing.
 
 #### Downloading Datasets
 
@@ -145,19 +145,41 @@ python scripts/compare_actions.py
 - They use `Panda` robot model that has 7 revolution joints (`joint_states` dimension is 7) and a gripper of 2 DoF (fingers positions but they're symmetric, so in action space it's just one dimension).
 The action dimension is 7: (px,py,pz,rx,ry,rz,gripper) and they're relative pose command (called `OSC_POSE` controller type in robosuite)
 
-### Training Models
-Train
+## Training Models
+
+Each of the models are simple to train. To adjust how the models train, inside the `scripts/train.py` file at the top you will see bolded variables. This defines the training parameters we used. The ones we modified for our training were `VISION_ENCODER`, `LANG_PROJ_DIM`, `FREEZE_VISION_ENCODER`, and `FREEZE_TEXT_ENCODER`. These define what encoders where used for vision and language and if they were frozen (no adjustments to the parameters). There are comments above with the available models/what you can input into the models.
+
+You can configure more aspects of the training of the model inside `diffusion_policy/env_config.py`. Here it is specified where the datasets to train the model are, what environment it uses, and any other specifics about the environment and training setup. To train to match what we used for our paper, change nothing here. Otherwise if you want to do more with our training setup, you can adjust the parameters here, just be careful and make sure you know what you are changing. The keys should be sufficiently self-explainatory.
+
+Below are the commands to train the models.
+
+Train for PushT task.
 ```bash
-python scripts/train.py --env libero
 python scripts/train.py --env pusht
 ```
 
-Visualize train loss via tensorboard
+Train for LIBERO task.
+```bash
+python scripts/train.py --env libero
+```
+
+### Visualizing the Training Process
+
+You can visualize the train loss via tensorboard. Run the command below inside the diff_policy environment and will show you the training loss over the number of steps the model has taken over all training sessions.
+
 ```bash
 tensorboard --logdir runs/
 ```
 
-Inference with Libero
+## Testing Models
+
+There are several ways to test the models. Note there is a very distict way to test the models PushT and LIBERO. PushT requires no additional steps to use the following testing script. LIBERO environment on the other hand requires setting up a server so that the environment can be run and interact with the model.
+
+### LIBERO Server
+
+The script
+
+### Inference
 
 Libero simulation environment server
 ```bash
@@ -165,14 +187,14 @@ conda activate libero
 python scripts/libero_env_server.py --env libero_goal --save-video
 ```
 
-## blabal
-python scripts/inference.py --save-video libero_test.mp4 --env libero --checkpoint ckpts/libero_epoch_19_20260417_151825_model.pth --task-idx 3
+### Evaluation
+
+There is a script for evaluating the performance of the models. This mainly has been tested for LIBERO. So be aware that PushT may have some bugs that we are not aware of.
+
+To evaluate, there is a few parameters to know about. Most importantly you it is recommended you set multiple servers to run since otherwise it will take an extremely long time to evaluate the models performance. It has two main modes `validation` and `test`. Validation is to validate the performance of all of the models. This will run through all of `libero_10` tasks with unique starting indices.
 
 
-
-
-
-## Notes
+## Known Issues
 - tensorboard fix if you get the bug for no module found pkg_resources: https://github.com/Nerogar/OneTrainer/issues/1304
 
 ## Code Source
