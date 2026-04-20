@@ -117,29 +117,44 @@ Setting up LIBERO requires a lot more steps. First make sure you have installed 
 
 #### Downloading Datasets
 
-To then download the daataset you have two options.
+To download the dataset you have two options.
 
 1. Via HuggingFace Website: Download LIBERO datasets into `data/libero` folder: You can download them manually from `https://libero-project.github.io/datasets` or using their provided script (requires using `libero` conda environment), which downloads to `libero/datasets`.  Move them to `data/libero`.
 
 2. Via CLI: To download the LIBERO dataset directly to the `data/libero` folder you can run the following script from inside the LIBERO environment: `python submodules/LIBERO/benchmark_scripts/download_libero_datasets.py --use-huggingface --download-dir data/libero --datasets all`.
 
-Next is to prepare the dataset for the LIBERO model. While you can utalize the dataset as is, in the diffusion paper they found that the model works much better when dealing with absolute positions rather than deltas.
+Next, prepare the dataset for our training pipeline. In Diffusion Policy, performance is typically better when training on absolute end-effector targets rather than delta actions.
 
 #### Converting to Absolute Position
 
-To make diffusion policy use actions = position control instead of velocity, must run this script. This takes unfortunately 2 minute per task, and we have 130 tasks... This script is adapted from https://github.com/2toinf/X-VLA/blob/main/evaluation/libero/rel2abs.py, you can see explanation here: https://github.com/2toinf/X-VLA/blob/main/evaluation/libero/preprocess.md
+Run conversion in the `libero` environment. The script recursively scans all `*.hdf5` files in `--input_dir` and writes a mirrored `_abs` directory.
+
+Recommended command (converts all suites inside `data/libero`):
 ```bash
 conda activate libero
-python scripts/rel2abs.py --input_dir data/libero/libero_10
+python scripts/rel2abs.py --input_dir data/libero
 ```
 
-TODO: Continue updating README here.
+This creates:
+- `data/libero_abs/libero_10/...`
+- `data/libero_abs/libero_goal/...`
+- `data/libero_abs/libero_object/...`
+- `data/libero_abs/libero_spatial/...`
 
-Next is to verify that the `rel2abs.py` has performed properly. Below is a quick script that verifies it works by simulating absolute actions on the env and compare original video with new video. 
+Important: training defaults (`diffusion_policy/env_config.py`) expect `dataset_path="data/libero_abs"` and `train_task_suite="libero_10"`.
+
+#### Verifying Conversion
+
+Use the comparison script to replay converted absolute actions and save a side-by-side video:
 ```bash
 conda activate libero
 python scripts/compare_actions.py
 ```
+
+The output video is written to:
+- `verify_side_by_side.mp4`
+
+If you use a different task or file path, update the hardcoded values at the bottom of `scripts/compare_actions.py` before running.
 
 #### Libero Dataset Notes
 - They use `Panda` robot model that has 7 revolution joints (`joint_states` dimension is 7) and a gripper of 2 DoF (fingers positions but they're symmetric, so in action space it's just one dimension).
@@ -173,25 +188,92 @@ tensorboard --logdir runs/
 
 ## Testing Models
 
-There are several ways to test the models. Note there is a very distict way to test the models PushT and LIBERO. PushT requires no additional steps to use the following testing script. LIBERO environment on the other hand requires setting up a server so that the environment can be run and interact with the model.
+There are several ways to test the models. PushT can run directly in the `diff_policy` environment. LIBERO requires a separate server process in the `libero` environment, then clients connect over ZMQ from `diff_policy`.
 
 ### LIBERO Server
 
-The script
+Since LIBERO has different dependencies, run it as a server in the `libero` conda environment.
+
+Start one server (default port `5555`):
+```bash
+conda activate libero
+python scripts/libero_env_server.py
+```
+
+Start a specific suite or port:
+```bash
+conda activate libero
+python scripts/libero_env_server.py --env libero_10 --port 5556
+```
 
 ### Inference
 
-Libero simulation environment server
+PushT inference (no server needed):
+```bash
+conda activate diff_policy
+python scripts/inference.py --env pusht --checkpoint ckpts/model.pth --save-video outputs/pusht_rollout.mp4
+```
+
+LIBERO inference (server required):
 ```bash
 conda activate libero
-python scripts/libero_env_server.py --env libero_goal --save-video
+python scripts/libero_env_server.py --env libero_goal --port 5555
+```
+
+In a second terminal:
+```bash
+conda activate diff_policy
+python scripts/inference.py --env libero --checkpoint ckpts/model.pth --task-idx 0 --suite libero_goal --save-video outputs/libero_rollout.mp4
 ```
 
 ### Evaluation
 
-There is a script for evaluating the performance of the models. This mainly has been tested for LIBERO. So be aware that PushT may have some bugs that we are not aware of.
+The evaluation script is focused on LIBERO checkpoints and writes resumable CSV files.
 
-To evaluate, there is a few parameters to know about. Most importantly you it is recommended you set multiple servers to run since otherwise it will take an extremely long time to evaluate the models performance. It has two main modes `validation` and `test`. Validation is to validate the performance of all of the models. This will run through all of `libero_10` tasks with unique starting indices.
+Modes:
+- `validate`: evaluates init states `0-19`
+- `test`: evaluates init states `20-39`
+
+Run validation with one server:
+```bash
+conda activate libero
+python scripts/libero_env_server.py --env libero_10 --port 5555
+```
+
+In a second terminal:
+```bash
+conda activate diff_policy
+python scripts/evaluate.py validate --checkpoints-dir ckpts/eval --zmq-address tcp://localhost:5555 --num-envs 1
+```
+
+Run faster validation with 4 parallel servers:
+```bash
+conda activate libero
+for port in 5555 5556 5557 5558; do
+	python scripts/libero_env_server.py --env libero_10 --port $port &
+done
+```
+
+Then run evaluation:
+```bash
+conda activate diff_policy
+python scripts/evaluate.py validate --checkpoints-dir ckpts/eval --zmq-address tcp://localhost:5555 --num-envs 4
+```
+
+Run test mode (optional unseen-task evaluation):
+```bash
+conda activate diff_policy
+python scripts/evaluate.py test --checkpoints-dir ckpts/eval --run-on-unseen
+```
+
+Useful flags:
+- `--output-dir eval_results` to control CSV output location
+- `--max-episodes N` for a quick smoke test
+- `--restart` to ignore existing CSV progress and start fresh
+
+Output files:
+- `eval_results/seen_tasks_validate.csv` or `eval_results/seen_tasks_test.csv`
+- `eval_results/unseen_tasks_test.csv` (only when `--run-on-unseen` is enabled)
 
 
 ## Known Issues
@@ -223,7 +305,7 @@ Add the submodule with the following command:
 git submodule update --init
 ```
 
-After you add it follow their instructions to install it as a seperate conda enviroment. After that install the datasets with the following command.
+After you add it, follow their instructions to install it as a separate conda environment. After that, install the datasets with the following command.
 ```bash
 python submodules/LIBERO/benchmark_scripts/download_libero_datasets.py --use-huggingface
 ```
