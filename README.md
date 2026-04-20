@@ -9,8 +9,8 @@ This repo contains the code for our final project in Deep Learning (CS 7150). Th
 We will have two virtual environments, one for diffusion policy and one for LIBERO benchmarks, due to dependencies conflicts.
 
 - Diffusion Policy (our package)
-    - Install torch with the appropriate CUDA version you have (check with `nvcc --version`) 
-    - Install package and other dependencies. 
+    - Install torch with the appropriate CUDA version you have (check with `nvcc --version`)
+    - Install package and other dependencies.
     ```bash
     conda create -n diff_policy python=3.13.12
     conda activate diff_policy
@@ -21,7 +21,7 @@ We will have two virtual environments, one for diffusion policy and one for LIBE
 - LIBERO (optional, only used for inference using LIBERO simulation environment): We follow their exact installation instructions, which we repeat below for convenience
     ```bash
     git submodule update --init
-    cd submodules/LIBERO 
+    cd submodules/LIBERO
 
     conda create -n libero python=3.8.13
     conda activate libero
@@ -30,6 +30,58 @@ We will have two virtual environments, one for diffusion policy and one for LIBE
     pip install torch==1.11.0+cu113 torchvision==0.12.0+cu113 torchaudio==0.11.0 --extra-index-url https://download.pytorch.org/whl/cu113
     pip install -e .
     ```
+
+## Environment Split: Which Conda Environment for Which Script?
+
+```
+cs7150_diffusion_policy/
+├── diffusion_policy/                          # Main package (use: diff_policy env)
+│   ├── env_config.py                          # Config registry for dims, paths, ZMQ address
+│   ├── remote_env.py                          # ZMQ client for remote LIBERO environment
+│   ├── dataset/
+│   │   ├── pusht.py                           # PushT zarr dataset loader with language dropout
+│   │   ├── libero.py                          # LIBERO HDF5 loader with normalization stats
+│   │   └── task_descriptions.json             # Language descriptions for tasks
+│   ├── model/
+│   │   ├── diffusion_policy.py                # Main policy model assembly & checkpoint handling
+│   │   ├── visual_encoder.py                  # Vision encoders: ResNet-18/CLIP/SigLIP/DINOv2
+│   │   ├── language_encoder.py                # Text encoders: standalone or shared CLIP/SigLIP
+│   │   ├── denoiser.py                        # Diffusion denoiser network
+│   │   ├── encoder_base.py                    # Base ABC for freeze_backbone contract
+│   │   └── diffusion_step_encoder.py          # Timestep encoding
+│   └── util/
+│       ├── normalization.py                   # Min-max normalization/denormalization
+│       └── rotation.py                        # 6D rotation, axis-angle, quat, matrix conversions
+│
+├── scripts/                                   # Executable workflows
+│   ├── train.py                               # Training entrypoint (diff_policy)
+│   ├── inference.py                           # Rollout with optional language conditioning (diff_policy)
+│   ├── evaluate.py                            # Batch evaluation across tasks (diff_policy) | multi-env, resumable CSV output
+│   ├── libero_env_server.py                   # ZMQ server for LIBERO sim (libero env)
+│   ├── rel2abs.py                             # Convert LIBERO HDF5 demos rel→abs actions (libero env) | 2 min/task, ~4+ hrs total
+│   ├── compare_actions.py                     # Verify absolute action conversion (libero env) | smoke test
+│   ├── test_env.py                            # Environment obs structure test (diff_policy)
+│   ├── download_pusht_dataset.py              # Download PushT from Google Drive (diff_policy)
+│   ├── pusht_env_xample.py                    # Minimal PushT random-action example (diff_policy)
+│   ├── demo.ipynb                             # Example notebook workflow
+│   ├── test_libero_control.ipynb              # LIBERO control testing
+│   └── test_libero_abs_direct.ipynb           # Absolute action LIBERO testing
+│
+├── data/                                      # Create manually: mkdir data (download here)
+│   ├── pusht/                                 # PushT zarr dataset (from download_pusht_dataset.py)
+│   └── libero/                                # LIBERO HDF5 datasets (manual download + rel2abs.py)
+│
+├── runs/                                      # Created by train.py (tensorboard logs)
+├── ckpts/                                     # Created by train.py (model checkpoints)
+├── submodules/LIBERO/                         # git submodule for LIBERO benchmark
+│
+└── pyproject.toml                             # Package metadata
+```
+
+**Legend:**
+- **(diff_policy)** = use `conda activate diff_policy` before running
+- **(libero env)** = use `conda activate libero` before running
+- Comment after script = key command-line arguments or purpose
 
 ## Scripts
 
