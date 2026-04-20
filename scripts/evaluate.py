@@ -5,6 +5,36 @@
 #         rates and writing CSV reports. Validate mode uses init states 0-19, test
 #         mode uses 20-39; unseen evaluation is gated by --run-eval-on-unseen flag.
 # Modifications:
+#   2026-04-19 | Prompt: Resume from partial results, progressive CSV writes, --restart flag |
+#               Added _load_progress to detect completed/partial checkpoint rows from an
+#               existing CSV (using empty-string sentinels). Added _init_csv to create the
+#               file with headers before any checkpoint finishes. Extended build_csv_row with
+#               all_task_names param so partial rows can emit empty strings for unevaluated
+#               tasks. write_csv now tolerates missing keys and accepts verbose=False for
+#               silent mid-run writes. evaluate_on_tasks gains partial_results (skip already-
+#               done tasks) and on_task_done callback (write partial CSV row after each task).
+#               main restructured: CSV created at startup, progress loaded/skipped before the
+#               loop, row appended after each checkpoint, partial row written after each task.
+#               Same logic applied to the unseen eval block. --restart flag to wipe progress.
+#   2026-04-19 | Prompt: Add unseen tasks and suite switching support | Populated
+#               UNSEEN_TASKS with 7 tasks from libero_goal (idx 3,5,9),
+#               libero_object (idx 4,7), and libero_spatial (idx 2,7). Added
+#               suite_name field to task dicts and threaded it through
+#               _EnvWorker.reset(), run_episodes_queue(), and evaluate_on_tasks()
+#               so the server can switch suites without needing separate processes.
+#   2026-04-19 | Prompt: dataset_path is base dir; join with train_task_suite; inject
+#               suite_name into seen tasks | load_model fallback now computes the HDF5
+#               folder as os.path.join(cfg["dataset_path"], cfg["train_task_suite"]).
+#               After fetching available_tasks from the server, suite_name is set to
+#               cfg["train_task_suite"] on each task dict so seen-task resets switch
+#               to the correct suite at evaluation start.
+#   2026-04-19 | Prompt: Fix stray break halting seen-task loop | Removed erroneous `break` on line 1038 that caused the checkpoint loop to exit immediately without evaluating any checkpoints.
+#   2026-04-19 | Prompt: Add suite and init_states columns to CSV | build_csv_row,
+#               write_csv, and _init_csv now accept suite and init_states params
+#               (e.g. "libero_10", "20-39") and write them as the second and third
+#               CSV columns after model. Unseen CSV records the sorted unique suite
+#               names from UNSEEN_TASKS. _load_progress unchanged (ignores non-task cols).
+# Modifications:
 #   2026-04-18 | Prompt: Add --max-episodes flag for quick smoke testing | Added
 #               optional --max-episodes arg that caps init_state_idxs to the first
 #               N states of the mode's range, so a 2-episode run can verify the
@@ -91,11 +121,10 @@ Usage:
     conda run -n diff_policy python scripts/evaluate.py validate \\
         --checkpoints-dir ckpts/eval/ --num-envs 4
 
-    # Test mode with unseen tasks (separate server on port 5560):
-    conda run -n libero python scripts/libero_env_server.py --env libero_spatial --port 5560
+    # Test mode with unseen tasks — same server handles all suites via suite switching:
+    conda run -n libero python scripts/libero_env_server.py --env libero_10 --port 5555
     conda run -n diff_policy python scripts/evaluate.py test \\
-        --checkpoints-dir ckpts/eval/ --run-eval-on-unseen \\
-        --unseen-zmq-address tcp://localhost:5560
+        --checkpoints-dir ckpts/eval/ --run-eval-on-unseen
 """
 
 import argparse
@@ -107,7 +136,7 @@ import threading
 from collections import deque
 from concurrent.futures import Future as _Future
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import torch
@@ -131,9 +160,16 @@ from diffusion_policy.util.normalization import normalize_data, unnormalize_data
 # (e.g. --env libero_spatial) before running with --run-eval-on-unseen.
 # ---------------------------------------------------------------------------
 UNSEEN_TASKS: list[dict] = [
-    # TODO: Fill in once user specifies which unseen tasks to evaluate on.
-    # Example:
-    # {"idx": 0, "name": "SCENE0_put_the_bowl_on_the_plate", "description": "put the bowl on the plate"},
+    # libero_goal tasks (indices from libero_suite_task_map)
+    {"idx": 3, "name": "open_the_top_drawer_and_put_the_bowl_inside", "description": "open the top drawer and put the bowl inside", "suite_name": "libero_goal"},
+    {"idx": 9, "name": "put_the_wine_bottle_on_the_rack", "description": "put the wine bottle on the rack", "suite_name": "libero_goal"},
+    {"idx": 5, "name": "push_the_plate_to_the_front_of_the_stove", "description": "push the plate to the front of the stove", "suite_name": "libero_goal"},
+    # libero_object tasks
+    {"idx": 4, "name": "pick_up_the_ketchup_and_place_it_in_the_basket", "description": "pick up the ketchup and place it in the basket", "suite_name": "libero_object"},
+    {"idx": 7, "name": "pick_up_the_milk_and_place_it_in_the_basket", "description": "pick up the milk and place it in the basket", "suite_name": "libero_object"},
+    # libero_spatial tasks
+    {"idx": 2, "name": "pick_up_the_black_bowl_from_table_center_and_place_it_on_the_plate", "description": "pick up the black bowl from table center and place it on the plate", "suite_name": "libero_spatial"},
+    {"idx": 7, "name": "pick_up_the_black_bowl_on_the_stove_and_place_it_on_the_plate", "description": "pick up the black bowl on the stove and place it on the plate", "suite_name": "libero_spatial"},
 ]
 
 logger = logging.getLogger(__name__)
@@ -239,8 +275,8 @@ class _EnvWorker:
     def get_tasks(self) -> list[dict]:
         return self._submit("get_tasks").result(timeout=60.0)
 
-    def reset(self, task_idx: Optional[int] = None, init_state_idx: Optional[int] = None) -> dict:
-        return self._submit("reset", task_idx=task_idx, init_state_idx=init_state_idx).result(timeout=600.0)
+    def reset(self, task_idx: Optional[int] = None, init_state_idx: Optional[int] = None, suite_name: Optional[str] = None) -> dict:
+        return self._submit("reset", task_idx=task_idx, init_state_idx=init_state_idx, suite_name=suite_name).result(timeout=600.0)
 
     def step(self, action: np.ndarray) -> tuple:
         return self._submit("step", action).result(timeout=60.0)
@@ -301,7 +337,9 @@ def load_model(
         )
 
         cfg = get_env_config(env_key)
-        hdf5_files = get_hdf5_files_from_folders(cfg["dataset_path"])
+        hdf5_files = get_hdf5_files_from_folders(
+            [os.path.join(cfg["dataset_path"], cfg["train_task_suite"])]
+        )
         stats = compute_stats_from_hdf5(hdf5_files, ["ee_pos", "ee_ori", "gripper_states"])
 
     return model, model_config, stats
@@ -381,6 +419,7 @@ def run_episodes_queue(
     task_idx: int,
     all_init_states: list[int],
     task_description: Optional[str],
+    suite_name: Optional[str],
     noise_scheduler: DDPMScheduler,
     pbar: Optional[tqdm] = None,
     step_timeout_s: float = 30.0,
@@ -453,7 +492,7 @@ def run_episodes_queue(
         if not items:
             return
         futs = [
-            envs[i]._submit("reset", task_idx=task_idx, init_state_idx=s)
+            envs[i]._submit("reset", task_idx=task_idx, init_state_idx=s, suite_name=suite_name)
             for i, s in items
         ]
         for (env_idx, _), fut in zip(items, futs):
@@ -608,20 +647,32 @@ def evaluate_on_tasks(
     tasks: list[dict],
     init_state_idxs: range,
     noise_scheduler: DDPMScheduler,
+    partial_results: Optional[dict[str, dict[str, int]]] = None,
+    on_task_done: Optional[Callable[[dict[str, dict[str, int]]], None]] = None,
 ) -> dict[str, dict[str, int]]:
     """Evaluate model across all tasks.
 
     Returns {task_name: {"successes": int, "attempts": int}} where attempts
     excludes episodes that were skipped because every live env died. The
     success rate is ``successes / attempts`` (caller responsibility).
+
+    partial_results: tasks already evaluated in a previous run; those tasks
+      are skipped and their counts carried forward.
+    on_task_done: called with the full accumulated results dict after each
+      task completes, so callers can write a partial CSV row mid-checkpoint.
     """
-    results: dict[str, dict[str, int]] = {}
+    results: dict[str, dict[str, int]] = dict(partial_results) if partial_results else {}
     all_states: list[int] = list(init_state_idxs)
 
     for task_info in tasks:
         task_idx: int = task_info["idx"]
         task_name: str = task_info["name"]
         task_description: Optional[str] = task_info.get("description")
+        suite_name: Optional[str] = task_info.get("suite_name")
+
+        if task_name in results:
+            logger.info(f"  Skipping {task_name[:50]} (already evaluated).")
+            continue
 
         with tqdm(total=len(all_states), desc=f"  {task_name[:40]}", leave=False) as pbar:
             episode_results: list[Optional[bool]] = run_episodes_queue(
@@ -634,6 +685,7 @@ def evaluate_on_tasks(
                 task_idx=task_idx,
                 all_init_states=all_states,
                 task_description=task_description,
+                suite_name=suite_name,
                 noise_scheduler=noise_scheduler,
                 pbar=pbar,
             )
@@ -655,6 +707,9 @@ def evaluate_on_tasks(
             f"  {task_name[:50]}: {rate:.2%} ({successes}/{attempts})"
         )
 
+        if on_task_done is not None:
+            on_task_done(results)
+
     return results
 
 
@@ -663,27 +718,38 @@ def evaluate_on_tasks(
 # ---------------------------------------------------------------------------
 
 def build_csv_row(
-    model_name: str, task_results: dict[str, dict[str, int]]
+    model_name: str,
+    task_results: dict[str, dict[str, int]],
+    all_task_names: Optional[list[str]] = None,
+    suite: str = "",
+    init_states: str = "",
 ) -> tuple[dict, float]:
     """Flatten per-task counts into a CSV row and compute totals.
 
-    Returns (row, avg_rate) where avg_rate is the mean of per-task success
-    rates (equal weight per task). Tasks with 0 attempts contribute 0.0.
+    If all_task_names is given, tasks absent from task_results emit empty
+    strings so partial rows can be written mid-checkpoint. avg_rate and totals
+    are computed over evaluated tasks only.
     """
-    row: dict = {"model": model_name}
+    row: dict = {"model": model_name, "suite": suite, "init_states": init_states}
     total_successes: int = 0
     total_attempts: int = 0
     rate_sum: float = 0.0
-    n_tasks: int = len(task_results)
+    n_tasks: int = 0
 
-    for task_name, counts in task_results.items():
-        s: int = counts["successes"]
-        a: int = counts["attempts"]
-        row[f"{task_name}_successes"] = s
-        row[f"{task_name}_attempts"] = a
-        total_successes += s
-        total_attempts += a
-        rate_sum += (s / a) if a else 0.0
+    ordered: list[str] = all_task_names if all_task_names is not None else list(task_results.keys())
+    for task_name in ordered:
+        if task_name in task_results:
+            s: int = task_results[task_name]["successes"]
+            a: int = task_results[task_name]["attempts"]
+            row[f"{task_name}_successes"] = s
+            row[f"{task_name}_attempts"] = a
+            total_successes += s
+            total_attempts += a
+            rate_sum += (s / a) if a else 0.0
+            n_tasks += 1
+        else:
+            row[f"{task_name}_successes"] = ""
+            row[f"{task_name}_attempts"] = ""
 
     avg_rate: float = rate_sum / n_tasks if n_tasks else 0.0
     row["total_successes"] = total_successes
@@ -692,14 +758,20 @@ def build_csv_row(
     return row, avg_rate
 
 
-def write_csv(output_path: str, rows: list[dict], task_names: list[str]) -> None:
+def write_csv(
+    output_path: str,
+    rows: list[dict],
+    task_names: list[str],
+    verbose: bool = True,
+) -> None:
     """Write a results table to CSV with one row per model.
 
-    Columns: model, then (<task>_successes, <task>_attempts) pairs per task,
-    then total_successes, total_attempts, and avg_success_rate (mean of the
-    per-task rates).
+    Columns: model, suite, init_states, then (<task>_successes, <task>_attempts)
+    pairs per task, then total_successes, total_attempts, and avg_success_rate
+    (mean of the per-task rates). Missing keys in a row are written as empty
+    strings so partial rows (mid-checkpoint) are valid CSV.
     """
-    fieldnames: list[str] = ["model"]
+    fieldnames: list[str] = ["model", "suite", "init_states"]
     for t in task_names:
         fieldnames.extend([f"{t}_successes", f"{t}_attempts"])
     fieldnames.extend(["total_successes", "total_attempts", "avg_success_rate"])
@@ -707,8 +779,67 @@ def write_csv(output_path: str, rows: list[dict], task_names: list[str]) -> None
     with open(output_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(rows)
-    logger.info(f"Saved results → {output_path}")
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in fieldnames})
+    if verbose:
+        logger.info(f"Saved results → {output_path}")
+
+
+def _load_progress(
+    csv_path: str,
+) -> tuple[dict[str, dict[str, dict[str, int]]], dict[str, dict[str, dict[str, int]]]]:
+    """Read a results CSV and split rows into completed and partial.
+
+    completed[ckpt_name] — every task column is filled in.
+    partial[ckpt_name]   — at least one task column is empty; only tasks that
+                           have been evaluated appear in the inner dict.
+    Task names are inferred from the header via <name>_successes columns.
+    """
+    completed: dict[str, dict[str, dict[str, int]]] = {}
+    partial: dict[str, dict[str, dict[str, int]]] = {}
+
+    if not os.path.exists(csv_path):
+        return completed, partial
+
+    with open(csv_path, newline="") as f:
+        reader = csv.DictReader(f)
+        task_names: list[str] = [
+            fn[: -len("_successes")]
+            for fn in (reader.fieldnames or [])
+            if fn.endswith("_successes")
+        ]
+        for row in reader:
+            ckpt_name: str = row["model"]
+            task_results: dict[str, dict[str, int]] = {}
+            is_complete: bool = True
+            for task_name in task_names:
+                s_str: str = row.get(f"{task_name}_successes", "")
+                a_str: str = row.get(f"{task_name}_attempts", "")
+                if s_str == "" or a_str == "":
+                    is_complete = False
+                else:
+                    task_results[task_name] = {
+                        "successes": int(s_str),
+                        "attempts": int(a_str),
+                    }
+            if is_complete:
+                completed[ckpt_name] = task_results
+            else:
+                partial[ckpt_name] = task_results
+
+    return completed, partial
+
+
+def _init_csv(output_path: str, task_names: list[str], force: bool = False) -> None:
+    """Write the CSV header row. Skips if the file already exists unless force=True."""
+    if not force and os.path.exists(output_path):
+        return
+    fieldnames: list[str] = ["model", "suite", "init_states"]
+    for t in task_names:
+        fieldnames.extend([f"{t}_successes", f"{t}_attempts"])
+    fieldnames.extend(["total_successes", "total_attempts", "avg_success_rate"])
+    with open(output_path, "w", newline="") as f:
+        csv.DictWriter(f, fieldnames=fieldnames).writeheader()
 
 
 # ---------------------------------------------------------------------------
@@ -778,7 +909,7 @@ def main() -> None:
         help="Directory containing .pth checkpoint files to evaluate",
     )
     parser.add_argument(
-        "--run-eval-on-unseen",
+        "--run-on-unseen",
         action="store_true",
         help="Also evaluate on unseen tasks (only active in test mode)",
     )
@@ -794,14 +925,6 @@ def main() -> None:
         default="tcp://localhost:5555",
         help="Base ZMQ address for seen-task servers. With --num-envs N, servers are "
              "expected on consecutive ports starting here (default: tcp://localhost:5555)",
-    )
-    parser.add_argument(
-        "--unseen-zmq-address",
-        type=str,
-        default=None,
-        metavar="ADDR",
-        help="Base ZMQ address for unseen-task servers (defaults to --zmq-address). "
-             "With --num-envs N, expects N servers on consecutive ports from this base.",
     )
     parser.add_argument(
         "--num-envs",
@@ -827,6 +950,11 @@ def main() -> None:
         help="Cap the number of init states evaluated per task (e.g. 2 for a quick smoke test). "
              "Defaults to the full range (20 for validate, 20 for test).",
     )
+    parser.add_argument(
+        "--restart",
+        action="store_true",
+        help="Ignore any existing CSV results and restart evaluation from scratch.",
+    )
     args = parser.parse_args()
 
     # Route logs through tqdm.write so they don't clobber active progress bars.
@@ -842,13 +970,15 @@ def main() -> None:
         run_eval_on_unseen: bool = False
     else:
         init_state_idxs = range(20, 40)
-        run_eval_on_unseen = args.run_eval_on_unseen
+        run_eval_on_unseen = args.run_on_unseen
 
     if args.max_episodes is not None:
         init_state_idxs = range(
             init_state_idxs.start,
             min(init_state_idxs.stop, init_state_idxs.start + args.max_episodes),
         )
+
+    init_states_str: str = f"{init_state_idxs.start}-{init_state_idxs.stop - 1}"
 
     cfg: dict = {**get_env_config(args.env), "zmq_address": args.zmq_address}
 
@@ -880,14 +1010,45 @@ def main() -> None:
     logger.info(f"Connecting to seen-task server(s): {seen_addresses}")
     seen_envs: list[_EnvWorker] = _make_env_workers(seen_addresses)
 
+    seen_suite: str = cfg["train_task_suite"]
     available_tasks: list[dict] = seen_envs[0].get_tasks()
+    for t in available_tasks:
+        t["suite_name"] = seen_suite
     logger.info(f"Tasks ({len(available_tasks)}): {[t['name'] for t in available_tasks]}")
     seen_task_names: list[str] = [t["name"] for t in available_tasks]
 
-    seen_rows: list[dict] = []
+    seen_csv: str = os.path.join(args.output_dir, f"seen_tasks_{args.mode}.csv")
+
+    if not args.restart and os.path.exists(seen_csv):
+        seen_completed, seen_partial = _load_progress(seen_csv)
+        logger.info(f"Resuming seen evaluation: {len(seen_completed)} checkpoint(s) already done.")
+    else:
+        seen_completed, seen_partial = {}, {}
+        if args.restart:
+            logger.info("--restart: ignoring previous seen-task results.")
+
+    _init_csv(seen_csv, seen_task_names, force=args.restart)
+
+    seen_rows: list[dict] = [
+        build_csv_row(p.name, seen_completed[p.name], seen_task_names, seen_suite, init_states_str)[0]
+        for p in ckpt_files
+        if p.name in seen_completed
+    ]
+
     for ckpt_path in ckpt_files:
+        if ckpt_path.name in seen_completed:
+            logger.info(f"Skipping {ckpt_path.name} (already evaluated).")
+            continue
+
         logger.info(f"--- Evaluating (seen): {ckpt_path.name} ---")
         model, model_config, stats = load_model(str(ckpt_path), args.env, device)
+
+        def _on_seen_task_done(
+            current_results: dict[str, dict[str, int]],
+            ckpt_name: str = ckpt_path.name,
+        ) -> None:
+            partial_row, _ = build_csv_row(ckpt_name, current_results, seen_task_names, seen_suite, init_states_str)
+            write_csv(seen_csv, seen_rows + [partial_row], seen_task_names, verbose=False)
 
         task_results: dict[str, dict[str, int]] = evaluate_on_tasks(
             model=model,
@@ -899,60 +1060,85 @@ def main() -> None:
             tasks=available_tasks,
             init_state_idxs=init_state_idxs,
             noise_scheduler=noise_scheduler,
+            partial_results=seen_partial.get(ckpt_path.name),
+            on_task_done=_on_seen_task_done,
         )
 
-        row, avg = build_csv_row(ckpt_path.name, task_results)
+        row, avg = build_csv_row(ckpt_path.name, task_results, seen_task_names, seen_suite, init_states_str)
         logger.info(f"{ckpt_path.name} — seen avg success: {avg:.2%}")
         seen_rows.append(row)
-
-    seen_csv: str = os.path.join(args.output_dir, f"seen_tasks_{args.mode}.csv")
-    write_csv(seen_csv, seen_rows, seen_task_names)
-    for env in seen_envs:
-        env.close()
+        write_csv(seen_csv, seen_rows, seen_task_names)
 
     # ------------------------------------------------------------------
     # Unseen task evaluation (test mode only, when flag is set)
+    # Reuses the same env workers — the server switches suites on demand
+    # via the suite_name field in each reset request.
     # ------------------------------------------------------------------
     if run_eval_on_unseen:
         if not UNSEEN_TASKS:
             logger.warning(
                 "UNSEEN_TASKS list is empty — skipping unseen evaluation. "
-                "Populate UNSEEN_TASKS at the top of evaluate.py with the task "
-                "indices and names from the unseen libero server."
+                "Populate UNSEEN_TASKS at the top of evaluate.py."
             )
         else:
-            unseen_base: str = args.unseen_zmq_address or args.zmq_address
-            unseen_addresses: list[str] = _make_addresses(unseen_base, args.num_envs)
-            logger.info(f"Connecting to unseen-task server(s): {unseen_addresses}")
-            unseen_envs: list[_EnvWorker] = _make_env_workers(unseen_addresses)
-
             unseen_task_names: list[str] = [t["name"] for t in UNSEEN_TASKS]
-            unseen_rows: list[dict] = []
+            unseen_suite: str = ",".join(sorted(set(t["suite_name"] for t in UNSEEN_TASKS)))
+            unseen_csv: str = os.path.join(args.output_dir, f"unseen_tasks_{args.mode}.csv")
+
+            if not args.restart and os.path.exists(unseen_csv):
+                unseen_completed, unseen_partial = _load_progress(unseen_csv)
+                logger.info(
+                    f"Resuming unseen evaluation: {len(unseen_completed)} checkpoint(s) already done."
+                )
+            else:
+                unseen_completed, unseen_partial = {}, {}
+                if args.restart:
+                    logger.info("--restart: ignoring previous unseen-task results.")
+
+            _init_csv(unseen_csv, unseen_task_names, force=args.restart)
+
+            unseen_rows: list[dict] = [
+                build_csv_row(p.name, unseen_completed[p.name], unseen_task_names, unseen_suite, init_states_str)[0]
+                for p in ckpt_files
+                if p.name in unseen_completed
+            ]
 
             for ckpt_path in ckpt_files:
+                if ckpt_path.name in unseen_completed:
+                    logger.info(f"Skipping {ckpt_path.name} (already evaluated, unseen).")
+                    continue
+
                 logger.info(f"--- Evaluating (unseen): {ckpt_path.name} ---")
                 model, model_config, stats = load_model(str(ckpt_path), args.env, device)
+
+                def _on_unseen_task_done(
+                    current_results: dict[str, dict[str, int]],
+                    ckpt_name: str = ckpt_path.name,
+                ) -> None:
+                    partial_row, _ = build_csv_row(ckpt_name, current_results, unseen_task_names, unseen_suite, init_states_str)
+                    write_csv(unseen_csv, unseen_rows + [partial_row], unseen_task_names, verbose=False)
 
                 task_results = evaluate_on_tasks(
                     model=model,
                     model_config=model_config,
                     stats=stats,
-                    envs=unseen_envs,
+                    envs=seen_envs,
                     cfg=cfg,
                     device=device,
                     tasks=UNSEEN_TASKS,
                     init_state_idxs=init_state_idxs,
                     noise_scheduler=noise_scheduler,
+                    partial_results=unseen_partial.get(ckpt_path.name),
+                    on_task_done=_on_unseen_task_done,
                 )
 
-                row, avg = build_csv_row(ckpt_path.name, task_results)
+                row, avg = build_csv_row(ckpt_path.name, task_results, unseen_task_names, unseen_suite, init_states_str)
                 logger.info(f"{ckpt_path.name} — unseen avg success: {avg:.2%}")
                 unseen_rows.append(row)
+                write_csv(unseen_csv, unseen_rows, unseen_task_names)
 
-            unseen_csv: str = os.path.join(args.output_dir, f"unseen_tasks_{args.mode}.csv")
-            write_csv(unseen_csv, unseen_rows, unseen_task_names)
-            for env in unseen_envs:
-                env.close()
+    for env in seen_envs:
+        env.close()
 
 
 

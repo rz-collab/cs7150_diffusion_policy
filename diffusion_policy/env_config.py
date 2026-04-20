@@ -16,6 +16,12 @@
 #   2026-04-15 | Prompt: Switch LIBERO to absolute actions | Changed control_delta
 #               from True to False so env config matches absolute-position mode
 #               used by all LIBERO task suites.
+#   2026-04-19 | Prompt: dataset_path is now a base directory; full path is
+#               dataset_path/train_task_suite | Changed libero dataset_path from
+#               ["data/libero_abs"] (a list with the suite baked in) to the bare
+#               string "data/libero_abs" so callers join it with train_task_suite
+#               at runtime. This lets you point at different suites without
+#               editing the path field directly.
 # ---
 
 # NOTE: This is a temporary file to integrate the two different environments frameworks.
@@ -45,7 +51,7 @@ ENV_CONFIGS = {
         "gym_api": "gymnasium",  # 5-tuple (obs, reward, terminated, truncated, info)
         "dataset_path": "data/pusht_cchi_v7_replay.zarr.zip",
         "task_descriptions_path": TASK_DESCRIPTIONS_PATH,
-        "task_descriptions_key": "pusht",
+        "train_task_suite": "pusht",
         "obs_horizon": 2,
         "action_exec_horizon": 8,
         "action_pred_horizon": 16,
@@ -61,9 +67,9 @@ ENV_CONFIGS = {
         "state_keys": ["robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos"],
         "gym_api": "gym",  # 4-tuple (obs, reward, done, info)
         "zmq_address": "tcp://localhost:5555",
-        "dataset_path": ["data/libero_abs/libero_10"],
+        "dataset_path": "data/libero_abs",
         "task_descriptions_path": TASK_DESCRIPTIONS_PATH,
-        "task_descriptions_key": "libero_10",
+        "train_task_suite": "libero_10",
         "obs_horizon": 2,
         "action_exec_horizon": 8,
         "action_pred_horizon": 16,

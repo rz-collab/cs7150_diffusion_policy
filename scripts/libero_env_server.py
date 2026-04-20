@@ -55,6 +55,23 @@
 #               added task_suite param to run_session and threaded it through run_server.
 #               Fixed: get_task_init_states returns np.ndarray in this LIBERO version,
 #               not a torch.Tensor; use hasattr guard instead of unconditional .numpy().
+#   2026-04-19 | Prompt: Support dynamic suite switching so one server handles all
+#               unseen tasks | Extracted _load_task_suite helper. Changed run_session
+#               to accept a suite_cache dict instead of fixed tasks/task_suite params.
+#               Reset command reads optional suite_name; if different from current,
+#               loads the new suite (with caching), closes the active env, and resets
+#               task state. run_server initializes the cache with the startup suite.
+#   2026-04-19 | Prompt: Print all suite/task options at startup and include suite in
+#               task-load log | Added _print_task_listing() that logs every suite from
+#               LIBERO_CONFIGS with all task indices from libero_task_map. Called once
+#               in __main__ only when LIBERO_WORKER env var is not set, so multi-server
+#               children (which inherit LIBERO_WORKER=1) stay silent. Task-load log
+#               line now shows [suite:idx] so it's clear which suite is active.
+#   2026-04-19 | Prompt: Update env name to the one set by connecting client | When a
+#               client reset switches suite_name, run_session now also updates cfg and
+#               image_key to match the new suite's LIBERO_CONFIGS entry. run_session
+#               return type extended to include final suite name; run_server uses it
+#               as env_key in save_video so videos are tagged with the active suite.
 # ---
 
 """
@@ -147,6 +164,33 @@ def get_task_description(task_name: str) -> str:
     name = re.sub(r"_demo$", "", task_name)
     name = re.sub(r"^[A-Z_]+SCENE\d+_", "", name)
     return name.replace("_", " ")
+
+
+def _print_task_listing() -> None:
+    """Print all available suites and their task indices to stdout."""
+    from libero.libero.benchmark.libero_suite_task_map import libero_task_map
+    logger.info("Available suites and tasks:")
+    for suite_key in LIBERO_CONFIGS:
+        task_names: List[str] = libero_task_map.get(suite_key, [])
+        logger.info(f"  [{suite_key}] ({len(task_names)} tasks)")
+        for i, name in enumerate(task_names):
+            logger.info(f"    [{i}] {name.replace('_', ' ')}")
+
+
+def _load_task_suite(suite_name: str) -> Tuple[Any, List[Dict[str, Any]]]:
+    """Load a LIBERO task suite and return (task_suite, tasks_list)."""
+    from libero.libero import benchmark as _benchmark
+    suite = _benchmark.get_benchmark_dict()[suite_name]()
+    tasks: List[Dict[str, Any]] = []
+    for i in range(suite.n_tasks):
+        t = suite.get_task(i)
+        tasks.append({
+            "idx": i,
+            "name": t.name,
+            "description": get_task_description(t.name),
+            "task": t,
+        })
+    return suite, tasks
 
 
 def make_libero_env(task, cfg: Dict[str, Any]):
@@ -317,21 +361,22 @@ def handle_render(last_obs: Optional[dict], image_key: str) -> Dict[str, Any]:
 
 def run_session(
     socket: zmq.Socket,
-    tasks: List[Dict[str, Any]],
-    task_suite,
+    suite_cache: Dict[str, Any],
     cfg: Dict[str, Any],
     control_delta: bool,
     image_key: str,
     record: bool,
     shutdown: threading.Event,
-) -> Tuple[bool, List[dict]]:
+) -> Tuple[bool, List[dict], str]:
     """Run a single client session.
 
     The environment is created lazily when the client sends a "reset" with
-    a task_idx, and recreated if the task_idx changes.
+    a task_idx, and recreated if the task_idx or suite_name changes.
 
-    Returns (should_continue, obs_history).
+    Returns (should_continue, obs_history, final_suite_name).
     """
+    current_suite_name: str = cfg["env_name"]
+    task_suite, tasks = suite_cache[current_suite_name]
     env = None
     current_task_idx: Optional[int] = None
     last_obs: Optional[dict] = None
@@ -354,6 +399,30 @@ def run_session(
             response = {"status": "ok", "tasks": task_info}
 
         elif cmd == "reset":
+            suite_name: str = request.get("suite_name", current_suite_name)
+            if suite_name != current_suite_name:
+                if suite_name not in LIBERO_CONFIGS:
+                    response = {
+                        "status": "error",
+                        "message": f"Unknown suite '{suite_name}'. "
+                        f"Choose from: {list(LIBERO_CONFIGS.keys())}",
+                    }
+                    socket.send(pickle.dumps(response))
+                    continue
+                if suite_name not in suite_cache:
+                    logger.info(f"Loading suite: {suite_name}")
+                    suite_cache[suite_name] = _load_task_suite(suite_name)
+                task_suite, tasks = suite_cache[suite_name]
+                current_suite_name = suite_name
+                cfg = LIBERO_CONFIGS[suite_name]
+                image_key = cfg.get("image_key", "agentview_image")
+                init_states_cache.clear()
+                if env is not None:
+                    close_env(env)
+                    env = None
+                current_task_idx = None
+                logger.info(f"Switched to suite: {suite_name} ({len(tasks)} tasks)")
+
             task_idx: int = request.get(
                 "task_idx",
                 current_task_idx if current_task_idx is not None else 0,
@@ -399,7 +468,7 @@ def run_session(
                 if env is not None:
                     close_env(env)
                 logger.info(
-                    f"Loading task {task_idx}: {tasks[task_idx]['description']}"
+                    f"Loading task [{current_suite_name}:{task_idx}]: {tasks[task_idx]['description']}"
                 )
                 env = make_libero_env(tasks[task_idx]["task"], cfg)
 
@@ -430,7 +499,7 @@ def run_session(
             if env is not None:
                 close_env(env)
             socket.send(pickle.dumps({"status": "ok"}))
-            return True, obs_history
+            return True, obs_history, current_suite_name
 
         elif cmd == "ping":
             response = {"status": "ok"}
@@ -443,7 +512,7 @@ def run_session(
     # Clean up on shutdown
     if env is not None:
         close_env(env)
-    return False, obs_history
+    return False, obs_history, current_suite_name
 
 
 def run_server(
@@ -460,25 +529,11 @@ def run_server(
     action_mode: str = "delta" if control_delta else "absolute"
     logger.info(f"Action mode: {action_mode}")
 
-    # Load task suite once at startup
-    from libero.libero import benchmark
-
-    task_suite = benchmark.get_benchmark_dict()[cfg["env_name"]]()
-    num_tasks: int = task_suite.n_tasks
-    tasks: List[Dict[str, Any]] = []
-    for i in range(num_tasks):
-        task = task_suite.get_task(i)
-        tasks.append(
-            {
-                "idx": i,
-                "name": task.name,
-                "description": get_task_description(task.name),
-                "task": task,
-            }
-        )
-    logger.info(f"Loaded {num_tasks} tasks from {cfg['env_name']}:")
-    for t in tasks:
-        logger.info(f"  [{t['idx']}] {t['description']}")
+    # Load initial task suite; additional suites are loaded on demand when a
+    # client reset request includes a different suite_name.
+    task_suite, tasks = _load_task_suite(cfg["env_name"])
+    suite_cache: Dict[str, Any] = {cfg["env_name"]: (task_suite, tasks)}
+    logger.info(f"Active suite: {cfg['env_name']} ({len(tasks)} tasks)")
 
     # ZMQ setup
     context: zmq.Context = zmq.Context()
@@ -504,10 +559,9 @@ def run_server(
         logger.info(f"Session {session_num}: waiting for client")
 
         try:
-            should_continue, obs_history = run_session(
+            should_continue, obs_history, active_suite = run_session(
                 socket,
-                tasks,
-                task_suite,
+                suite_cache,
                 cfg,
                 control_delta,
                 image_key,
@@ -520,6 +574,7 @@ def run_server(
             logger.error(f"ZMQ error: {e}")
             should_continue = False
             obs_history = []
+            active_suite = env_key
         except Exception as e:
             logger.error(f"Session error: {e}", exc_info=True)
             try:
@@ -528,10 +583,11 @@ def run_server(
                 pass
             should_continue = True
             obs_history = []
+            active_suite = env_key
 
         # Save video if recording was enabled and frames were collected
         if record and obs_history:
-            save_video(obs_history, video_dir, env_key, camera_keys)
+            save_video(obs_history, video_dir, active_suite, camera_keys)
 
         logger.info(f"Session {session_num}: ended")
 
@@ -615,7 +671,7 @@ def run_multi_server(args: argparse.Namespace) -> None:
         if args.delta_actions:
             cmd.append("--delta-actions")
 
-        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        env = {**os.environ, "PYTHONUNBUFFERED": "1", "LIBERO_WORKER": "1"}
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -699,6 +755,10 @@ if __name__ == "__main__":
     # Shorthand: --video-cameras both
     if args.video_cameras == ["both"]:
         args.video_cameras = ["agentview_image", "robot0_eye_in_hand_image"]
+
+    import os as _os
+    if not _os.environ.get("LIBERO_WORKER"):
+        _print_task_listing()
 
     if args.num_servers > 1:
         run_multi_server(args)

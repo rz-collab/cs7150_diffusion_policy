@@ -67,6 +67,11 @@
 #               weights_only=False because the checkpoint contains numpy arrays
 #               (via numpy._core.multiarray._reconstruct) which are rejected by
 #               PyTorch 2.6+'s default weights_only=True safe-unpickling.
+#   2026-04-19 | Prompt: Add --suite flag for LIBERO task suite selection | Added
+#               suite param to run_inference() and --suite CLI arg. When specified,
+#               a preliminary reset(suite_name=suite) switches the server's active
+#               suite before get_tasks() so the returned task list matches the
+#               requested suite. suite_name is also forwarded to the final reset().
 # ---
 
 # TODO: Review the code generated and make sure it works properly
@@ -194,6 +199,7 @@ def run_inference(
     task_description: str | None = None,
     task_idx: int | None = None,
     display: bool = False,
+    suite: str | None = None,
 ) -> None:
     cfg: dict = get_env_config(env_key)
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -277,20 +283,25 @@ def run_inference(
     # For LIBERO, query available tasks from the server and select one.
     # The task description is used for language-conditioned models.
     if env_key == "libero":
+        # If a suite is specified, switch the server to it before querying tasks
+        # so get_tasks() returns the task list for that suite.
+        if suite is not None:
+            env.reset(suite_name=suite)
         available_tasks: list[dict] = env.get_tasks()
         if task_idx is not None:
-            selected = available_tasks[task_idx]
+            matched: list[dict] = [t for t in available_tasks if t["idx"] == task_idx]
+            selected: dict = matched[0] if matched else available_tasks[task_idx]
         else:
             selected = random.choice(available_tasks)
             task_idx = selected["idx"]
         if task_description is None:
             task_description = selected["description"]
         logger.info(f"Task {task_idx}: {task_description}")
-        obs: dict = env.reset(task_idx=task_idx)
+        obs: dict = env.reset(task_idx=task_idx, suite_name=suite)
     else:
         # PushT: pick a random description from the JSON file
         desc_path: str = cfg.get("task_descriptions_path", "")
-        desc_key: str = cfg.get("task_descriptions_key", env_key)
+        desc_key: str = cfg.get("train_task_suite", env_key)
         if task_description is None and desc_path and os.path.exists(desc_path):
             with open(desc_path, "r") as f:
                 all_descriptions: dict = json.load(f)
@@ -452,8 +463,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--env",
         type=str,
-        default="pusht",
-        help="Environment config key (default: pusht). See env_config.py for options.",
+        default="libero",
+        help="Environment config key (default: libero). See env_config.py for options.",
     )
     parser.add_argument(
         "--checkpoint",
@@ -487,6 +498,13 @@ if __name__ == "__main__":
         help="LIBERO task index to run (random if omitted). "
         "Use get_tasks on the server to see available indices.",
     )
+    parser.add_argument(
+        "--suite",
+        type=str,
+        default=None,
+        help="LIBERO task suite to run (e.g. libero_spatial, libero_goal). "
+        "Switches the server to that suite before selecting a task.",
+    )
     args = parser.parse_args()
     if args.checkpoint:
         MODEL_LOAD_PATH = args.checkpoint
@@ -496,4 +514,5 @@ if __name__ == "__main__":
         task_description=args.task_description,
         task_idx=args.task_idx,
         display=args.display,
+        suite=args.suite,
     )

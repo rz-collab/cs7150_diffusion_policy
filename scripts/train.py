@@ -40,6 +40,10 @@
 #               ENCODER_TYPE, PRETRAINED_MODEL, TEXT_PRETRAINED_MODEL with
 #               VISION_ENCODER and TEXT_ENCODER. Updated DiffusionPolicy call
 #               and description-loading guard to use new params.
+#   2026-04-19 | Prompt: dataset_path is now a base dir; join with train_task_suite |
+#               Changed LIBERO data loading to compute the HDF5 folder as
+#               os.path.join(cfg["dataset_path"], cfg["train_task_suite"]) so
+#               the full path is derived at runtime instead of hardcoded in config.
 # ---
 
 import json
@@ -157,7 +161,7 @@ if __name__ == "__main__":
     task_descriptions: list[str] = []
     task_descriptions_by_task: dict[str, list[str]] | None = None
     desc_path: str = cfg.get("task_descriptions_path", "")
-    desc_key: str = cfg.get("task_descriptions_key", ENV)
+    desc_key: str = cfg.get("train_task_suite", ENV)
     if TEXT_ENCODER is not None and desc_path and os.path.exists(desc_path):
         with open(desc_path, "r") as f:
             all_descriptions: dict = json.load(f)
@@ -199,7 +203,9 @@ if __name__ == "__main__":
         cfg["state_obs_dim"] = 3 + 4 + 2
         cfg["action_dim"] = 3 + 6 + 1
 
-        hdf5_files = get_hdf5_files_from_folders(cfg["dataset_path"])
+        hdf5_files = get_hdf5_files_from_folders(
+            [os.path.join(cfg["dataset_path"], cfg["train_task_suite"])]
+        )
         obs_keys = [cfg["image_key"]] + cfg["state_keys"]
 
         # Compute stats for states and actions for normalization and denormalization purpose
