@@ -249,10 +249,9 @@ python scripts/evaluate.py validate --checkpoints-dir ckpts/eval --zmq-address t
 Run faster validation with 4 parallel servers:
 ```bash
 conda activate libero
-for port in 5555 5556 5557 5558; do
-	python scripts/libero_env_server.py --env libero_10 --port $port &
-done
+python scripts/libero_env_server.py --env libero_10 --num-server 4
 ```
+Note: I have used up to 6, however, the more you add the more unstable it becomes. I found more than 6 was too unstable to use and slowed you down more than saved time.
 
 Then run evaluation:
 ```bash
