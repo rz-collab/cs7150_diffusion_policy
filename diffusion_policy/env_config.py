@@ -1,9 +1,3 @@
-# NOTE: This is a temporary file to integrate the two different environments frameworks.
-# TODO: Test out the code to make sure it functions properly. Make sure loading the environment
-# works properly and that its possible to change the environment, datasets, model parameters.
-# Make sure that these are worth keeping or if there is anything I should change to make it
-# better/function better.
-
 # |o|o|                             observations: 2
 # | |a|a|a|a|a|a|a|a|               actions executed: 8
 # |p|p|p|p|p|p|p|p|p|p|p|p|p|p|p|p| actions predicted: 16
