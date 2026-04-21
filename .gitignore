@@ -9,3 +9,4 @@ runs/
 CLAUDE.md
 .vscode/*
 temp/
+.DS_Store
