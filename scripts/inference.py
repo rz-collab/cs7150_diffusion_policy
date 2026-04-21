@@ -1,5 +1,3 @@
-# TODO: Review the code generated and make sure it works properly
-
 import argparse
 import json
 import random

@@ -191,6 +191,7 @@ subsequent modifications with their prompts and descriptions.
 | 2026-04-19 | Support dynamic suite switching so one server handles all unseen tasks | Extracted `_load_task_suite` helper. Changed `run_session` to accept a `suite_cache` dict instead of fixed `tasks`/`task_suite` params. Reset command reads optional `suite_name`; if different from current, loads the new suite (with caching), closes the active env, and resets task state. `run_server` initializes the cache with the startup suite |
 | 2026-04-19 | Print all suite/task options at startup and include suite in task-load log | Added `_print_task_listing()` that logs every suite from `LIBERO_CONFIGS` with all task indices from `libero_task_map`. Called once in `__main__` only when `LIBERO_WORKER` env var is not set, so multi-server children (which inherit `LIBERO_WORKER=1`) stay silent. Task-load log line now shows `[suite:idx]` so it's clear which suite is active |
 | 2026-04-19 | Update env name to the one set by connecting client | When a client reset switches `suite_name`, `run_session` now also updates `cfg` and `image_key` to match the new suite's `LIBERO_CONFIGS` entry. `run_session` return type extended to include final suite name; `run_server` uses it as `env_key` in `save_video` so videos are tagged with the active suite |
+| 2026-04-20 | Return suite_name in get_tasks so client knows which suite is active without injecting it manually | Added `suite_name` field to each task dict in the `get_tasks` response using `current_suite_name` |
 
 ---
 
