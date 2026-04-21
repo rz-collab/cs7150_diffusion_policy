@@ -28,6 +28,24 @@
 #               After fetching available_tasks from the server, suite_name is set to
 #               cfg["train_task_suite"] on each task dict so seen-task resets switch
 #               to the correct suite at evaluation start.
+#   2026-04-20 | Prompt: Add task name/idx columns; use sequential col index; match
+#               progress by name+suite | build_csv_row, _merge_fieldnames, and
+#               _init_csv use enumerate position (0..N-1) as col prefix and emit
+#               {col_idx}_task_name (t["name"]) and {col_idx}_idx (t["idx"]).
+#               _load_progress now matches CSV columns to current tasks by
+#               (task_name, suite) read from {col_idx}_task_name/{col_idx}_suite
+#               columns instead of by column position, so progress survives task
+#               list reordering.
+#   2026-04-20 | Prompt: Fix suite mismatch; preserve/add CSV columns across runs |
+#               In main(), added seen_envs[0].reset(suite_name=seen_suite) before
+#               get_tasks() so the server is on the correct suite when task names are
+#               read; server now returns suite_name in get_tasks so manual injection
+#               removed. Added _read_raw_rows and _merge_fieldnames helpers; write_csv
+#               now merges old CSV data (old task columns) with in-memory rows so
+#               columns from previous runs are preserved and new task columns are
+#               appended. _init_csv expands an existing CSV header when new task
+#               columns are needed. _load_progress gains a Case-2 guard: if a current
+#               task's idx is absent from the CSV, the checkpoint is marked partial.
 #   2026-04-19 | Prompt: Fix stray break halting seen-task loop | Removed erroneous `break` on line 1038 that caused the checkpoint loop to exit immediately without evaluating any checkpoints.
 #   2026-04-19 | Prompt: Add suite and init_states columns to CSV | build_csv_row,
 #               write_csv, and _init_csv now accept suite and init_states params
@@ -104,6 +122,14 @@
 #               total startup time = min(all_ready, startup_timeout_s=30s).
 #               Workers that miss the deadline are marked dead and skipped;
 #               evaluation starts immediately with whoever connected.
+#   2026-04-20 | Prompt: Change CSV column format to use numeric task indices |
+#               Replaced per-task columns from <task_name>_successes/<task_name>_attempts
+#               to {idx}_successes/{idx}_attempts/{idx}_suite. Removed suite,
+#               init_states, total_successes, total_attempts as standalone columns;
+#               final column is now avg_success_rate only. Updated build_csv_row,
+#               write_csv, _init_csv, _load_progress to accept tasks: list[dict]
+#               instead of task_names: list[str]. Removed seen_task_names,
+#               unseen_task_names, unseen_suite, and init_states_str variables.
 # ---
 
 """
@@ -779,19 +805,15 @@ def evaluate_on_tasks(
 def build_csv_row(
     model_name: str,
     task_results: dict[str, dict[str, int]],
-    all_task_names: Optional[list[str]] = None,
-    suite: str = "",
-    init_states: str = "",
+    tasks: list[dict],
 ) -> tuple[dict, float]:
-    """Flatten per-task counts into a CSV row and compute totals.
+    """Flatten per-task counts into a CSV row and compute the avg success rate.
 
-    If all_task_names is given, tasks absent from task_results emit empty
-    strings so partial rows can be written mid-checkpoint. avg_rate and totals
-    are computed over evaluated tasks only.
+    Tasks absent from task_results emit empty strings for successes/attempts so
+    partial rows can be written mid-checkpoint. avg_rate is computed over
+    evaluated tasks only.
     """
-    row: dict = {"model": model_name, "suite": suite, "init_states": init_states}
-    total_successes: int = 0
-    total_attempts: int = 0
+    row: dict = {"model": model_name}
     rate_sum: float = 0.0
     n_tasks: int = 0
 
@@ -802,59 +824,90 @@ def build_csv_row(
         if task_name in task_results:
             s: int = task_results[task_name]["successes"]
             a: int = task_results[task_name]["attempts"]
-            row[f"{task_name}_successes"] = s
-            row[f"{task_name}_attempts"] = a
-            total_successes += s
-            total_attempts += a
+            row[f"{col_idx}_successes"] = s
+            row[f"{col_idx}_attempts"] = a
+            row[f"{col_idx}_suite"] = suite
+            row[f"{col_idx}_task_name"] = task_name
+            row[f"{col_idx}_idx"] = server_idx
             rate_sum += (s / a) if a else 0.0
             n_tasks += 1
         else:
-            row[f"{task_name}_successes"] = ""
-            row[f"{task_name}_attempts"] = ""
+            row[f"{col_idx}_successes"] = ""
+            row[f"{col_idx}_attempts"] = ""
+            row[f"{col_idx}_suite"] = suite
+            row[f"{col_idx}_task_name"] = task_name
+            row[f"{col_idx}_idx"] = server_idx
 
     avg_rate: float = rate_sum / n_tasks if n_tasks else 0.0
-    row["total_successes"] = total_successes
-    row["total_attempts"] = total_attempts
     row["avg_success_rate"] = avg_rate
     return row, avg_rate
+
+
+def _read_raw_rows(csv_path: str) -> tuple[list[str], dict[str, dict[str, str]]]:
+    """Read an existing CSV and return (fieldnames, {model: row_dict})."""
+    if not os.path.exists(csv_path):
+        return [], {}
+    with open(csv_path, newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames: list[str] = list(reader.fieldnames or [])
+        row_map: dict[str, dict[str, str]] = {row["model"]: dict(row) for row in reader}
+    return fieldnames, row_map
+
+
+def _merge_fieldnames(existing: list[str], tasks: list[dict]) -> list[str]:
+    """Union of existing CSV columns and new task columns.
+
+    Preserves existing column order, appends new task columns before
+    avg_success_rate, ensures model is first and avg_success_rate is last.
+    """
+    existing_set: set[str] = set(existing)
+    new_task_cols: list[str] = [
+        col
+        for col_idx in range(len(tasks))
+        for col in [f"{col_idx}_successes", f"{col_idx}_attempts", f"{col_idx}_suite", f"{col_idx}_task_name", f"{col_idx}_idx"]
+        if col not in existing_set
+    ]
+    base: list[str] = [c for c in existing if c not in {"model", "avg_success_rate"}]
+    return ["model"] + base + new_task_cols + ["avg_success_rate"]
 
 
 def write_csv(
     output_path: str,
     rows: list[dict],
-    task_names: list[str],
+    tasks: list[dict],
     verbose: bool = True,
 ) -> None:
     """Write a results table to CSV with one row per model.
 
-    Columns: model, suite, init_states, then (<task>_successes, <task>_attempts)
-    pairs per task, then total_successes, total_attempts, and avg_success_rate
-    (mean of the per-task rates). Missing keys in a row are written as empty
-    strings so partial rows (mid-checkpoint) are valid CSV.
+    Preserves columns from any existing CSV that aren't in the current task list
+    and adds new columns for tasks not yet present. For each row, merges existing
+    CSV data (old task columns) with in-memory data (current task columns).
     """
-    fieldnames: list[str] = ["model", "suite", "init_states"]
-    for t in task_names:
-        fieldnames.extend([f"{t}_successes", f"{t}_attempts"])
-    fieldnames.extend(["total_successes", "total_attempts", "avg_success_rate"])
+    existing_fieldnames, old_row_map = _read_raw_rows(output_path)
+    fieldnames: list[str] = _merge_fieldnames(existing_fieldnames, tasks)
 
     with open(output_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
-            writer.writerow({k: row.get(k, "") for k in fieldnames})
+            model: str = row["model"]
+            merged: dict = {**old_row_map.get(model, {}), **row}
+            writer.writerow({k: merged.get(k, "") for k in fieldnames})
     if verbose:
         logger.info(f"Saved results → {output_path}")
 
 
 def _load_progress(
     csv_path: str,
+    tasks: list[dict],
 ) -> tuple[dict[str, dict[str, dict[str, int]]], dict[str, dict[str, dict[str, int]]]]:
     """Read a results CSV and split rows into completed and partial.
 
     completed[ckpt_name] — every task column is filled in.
     partial[ckpt_name]   — at least one task column is empty; only tasks that
                            have been evaluated appear in the inner dict.
-    Task names are inferred from the header via <name>_successes columns.
+    Task indices are read from the header via {idx}_successes columns and
+    mapped back to task names using the provided tasks list.
     """
     completed: dict[str, dict[str, dict[str, int]]] = {}
     partial: dict[str, dict[str, dict[str, int]]] = {}
@@ -862,9 +915,16 @@ def _load_progress(
     if not os.path.exists(csv_path):
         return completed, partial
 
+    # Match tasks by (name, suite) so column order changes between runs don't
+    # invalidate existing progress.
+    current_keys: set[tuple[str, str]] = {
+        (t["name"], t.get("suite_name", "")) for t in tasks
+    }
+    n_current: int = len(tasks)
+
     with open(csv_path, newline="") as f:
         reader = csv.DictReader(f)
-        task_names: list[str] = [
+        idx_strs: list[str] = [
             fn[: -len("_successes")]
             for fn in (reader.fieldnames or [])
             if fn.endswith("_successes")
@@ -873,16 +933,22 @@ def _load_progress(
             ckpt_name: str = row["model"]
             task_results: dict[str, dict[str, int]] = {}
             is_complete: bool = True
-            for task_name in task_names:
-                s_str: str = row.get(f"{task_name}_successes", "")
-                a_str: str = row.get(f"{task_name}_attempts", "")
+            for idx_str in idx_strs:
+                csv_task_name: str = row.get(f"{idx_str}_task_name", "")
+                csv_suite: str = row.get(f"{idx_str}_suite", "")
+                if (csv_task_name, csv_suite) not in current_keys:
+                    continue
+                s_str: str = row.get(f"{idx_str}_successes", "")
+                a_str: str = row.get(f"{idx_str}_attempts", "")
                 if s_str == "" or a_str == "":
                     is_complete = False
                 else:
-                    task_results[task_name] = {
+                    task_results[csv_task_name] = {
                         "successes": int(s_str),
                         "attempts": int(a_str),
                     }
+            if is_complete and len(task_results) < n_current:
+                is_complete = False
             if is_complete:
                 completed[ckpt_name] = task_results
             else:
@@ -891,16 +957,73 @@ def _load_progress(
     return completed, partial
 
 
-def _init_csv(output_path: str, task_names: list[str], force: bool = False) -> None:
-    """Write the CSV header row. Skips if the file already exists unless force=True."""
-    if not force and os.path.exists(output_path):
+def _init_csv(output_path: str, tasks: list[dict], force: bool = False) -> None:
+    """Create or expand the CSV header.
+
+    If the file doesn't exist (or force=True), writes a fresh header with current
+    task columns. If it already exists, adds any missing task columns while keeping
+    existing columns and data intact.
+    """
+    if force or not os.path.exists(output_path):
+        fieldnames: list[str] = ["model"]
+        for col_idx in range(len(tasks)):
+            fieldnames.extend([f"{col_idx}_successes", f"{col_idx}_attempts", f"{col_idx}_suite", f"{col_idx}_task_name", f"{col_idx}_idx"])
+        fieldnames.append("avg_success_rate")
+        with open(output_path, "w", newline="") as f:
+            csv.DictWriter(f, fieldnames=fieldnames).writeheader()
         return
-    fieldnames: list[str] = ["model", "suite", "init_states"]
-    for t in task_names:
-        fieldnames.extend([f"{t}_successes", f"{t}_attempts"])
-    fieldnames.extend(["total_successes", "total_attempts", "avg_success_rate"])
+
+    existing_fieldnames, old_row_map = _read_raw_rows(output_path)
+    merged: list[str] = _merge_fieldnames(existing_fieldnames, tasks)
+    if merged == existing_fieldnames:
+        return
     with open(output_path, "w", newline="") as f:
-        csv.DictWriter(f, fieldnames=fieldnames).writeheader()
+        writer = csv.DictWriter(f, fieldnames=merged)
+        writer.writeheader()
+        for old_row in old_row_map.values():
+            writer.writerow({k: old_row.get(k, "") for k in merged})
+
+
+# ---------------------------------------------------------------------------
+# Unseen task validation
+# ---------------------------------------------------------------------------
+
+def _validate_unseen_tasks(tasks: list[dict], env: "_EnvWorker") -> None:
+    """Check that every UNSEEN_TASKS entry name matches the server's task name at that idx.
+
+    Groups tasks by suite, switches the server to each suite once, then compares
+    the hardcoded name against what the server reports for that task_idx.
+    Raises ValueError listing all mismatches so the caller can fix UNSEEN_TASKS.
+    """
+    from collections import defaultdict
+
+    by_suite: dict[str, list[dict]] = defaultdict(list)
+    for t in tasks:
+        by_suite[t.get("suite_name", "")].append(t)
+
+    mismatches: list[str] = []
+    for suite_name, suite_tasks in by_suite.items():
+        env.reset(suite_name=suite_name)
+        server_tasks: list[dict] = env.get_tasks()
+        server_name_by_idx: dict[int, str] = {st["idx"]: st["name"] for st in server_tasks}
+        for t in suite_tasks:
+            actual: Optional[str] = server_name_by_idx.get(t["idx"])
+            if actual is None:
+                mismatches.append(
+                    f"  [{suite_name}] idx {t['idx']}: not found on server"
+                    f" (expected '{t['name']}')"
+                )
+            elif actual != t["name"]:
+                mismatches.append(
+                    f"  [{suite_name}] idx {t['idx']}:"
+                    f" expected '{t['name']}', server has '{actual}'"
+                )
+
+    if mismatches:
+        raise ValueError(
+            "UNSEEN_TASKS name mismatch(es) — update UNSEEN_TASKS to match the server:\n"
+            + "\n".join(mismatches)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1047,8 +1170,6 @@ def main() -> None:
             min(init_state_idxs.stop, init_state_idxs.start + args.max_episodes),
         )
 
-    init_states_str: str = f"{init_state_idxs.start}-{init_state_idxs.stop - 1}"
-
     cfg: dict = {**get_env_config(args.env), "zmq_address": args.zmq_address}
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -1082,6 +1203,9 @@ def main() -> None:
     seen_envs: list[_EnvWorker] = _make_env_workers(seen_addresses)
 
     seen_suite: str = cfg["train_task_suite"]
+    # Switch server to the correct suite before querying tasks so suite_name
+    # in the response reflects the actual suite being evaluated.
+    seen_envs[0].reset(suite_name=seen_suite)
     available_tasks: list[dict] = seen_envs[0].get_tasks()
     for t in available_tasks:
         t["suite_name"] = seen_suite
@@ -1112,7 +1236,7 @@ def main() -> None:
         if args.restart:
             logger.info("--restart: ignoring previous seen-task results.")
 
-    _init_csv(seen_csv, seen_task_names, force=args.restart)
+    _init_csv(seen_csv, available_tasks, force=args.restart)
 
     seen_rows: list[dict] = [
         build_csv_row(
@@ -1160,7 +1284,7 @@ def main() -> None:
         )
         logger.info(f"{ckpt_path.name} — seen avg success: {avg:.2%}")
         seen_rows.append(row)
-        write_csv(seen_csv, seen_rows, seen_task_names)
+        write_csv(seen_csv, seen_rows, available_tasks)
 
     # ------------------------------------------------------------------
     # Unseen task evaluation (test mode only, when flag is set)
@@ -1183,7 +1307,7 @@ def main() -> None:
             )
 
             if not args.restart and os.path.exists(unseen_csv):
-                unseen_completed, unseen_partial = _load_progress(unseen_csv)
+                unseen_completed, unseen_partial = _load_progress(unseen_csv, UNSEEN_TASKS)
                 logger.info(
                     f"Resuming unseen evaluation: {len(unseen_completed)} checkpoint(s) already done."
                 )
@@ -1192,7 +1316,7 @@ def main() -> None:
                 if args.restart:
                     logger.info("--restart: ignoring previous unseen-task results.")
 
-            _init_csv(unseen_csv, unseen_task_names, force=args.restart)
+            _init_csv(unseen_csv, UNSEEN_TASKS, force=args.restart)
 
             unseen_rows: list[dict] = [
                 build_csv_row(
@@ -1259,7 +1383,7 @@ def main() -> None:
                 )
                 logger.info(f"{ckpt_path.name} — unseen avg success: {avg:.2%}")
                 unseen_rows.append(row)
-                write_csv(unseen_csv, unseen_rows, unseen_task_names)
+                write_csv(unseen_csv, unseen_rows, UNSEEN_TASKS)
 
     for env in seen_envs:
         env.close()
