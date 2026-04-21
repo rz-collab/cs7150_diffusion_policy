@@ -258,7 +258,7 @@ python scripts/evaluate.py validate --checkpoints-dir ckpts/eval --zmq-address t
 Run test mode (optional unseen-task evaluation):
 ```bash
 conda activate diff_policy
-python scripts/evaluate.py test --checkpoints-dir ckpts/eval --run-on-unseen
+python scripts/evaluate.py test --checkpoints-dir ckpts/eval --run-on-unseen --zmq-address tcp://localhost:5555 --num-envs 4
 ```
 
 ## Known Issues
