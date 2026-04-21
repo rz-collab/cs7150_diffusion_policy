@@ -199,7 +199,7 @@ python scripts/libero_env_server.py
 Start a specific suite or port:
 ```bash
 conda activate libero
-python scripts/libero_env_server.py --env libero_10 --port 5556
+python scripts/libero_env_server.py --env libero_10 --port 5555
 ```
 
 ### Inference
@@ -213,13 +213,13 @@ python scripts/inference.py --env pusht --checkpoint ckpts/model.pth --save-vide
 LIBERO inference (server required):
 ```bash
 conda activate libero
-python scripts/libero_env_server.py --env libero_goal --port 5555
+python scripts/libero_env_server.py --env libero_goal --port 5555 --save-video
 ```
 
 In a second terminal:
 ```bash
 conda activate diff_policy
-python scripts/inference.py --env libero --checkpoint ckpts/model.pth --task-idx 0 --suite libero_goal --save-video outputs/libero_rollout.mp4
+python scripts/inference.py --env libero --checkpoint ckpts/model.pth --task-idx 0 --suite libero_goal
 ```
 
 ### Evaluation
