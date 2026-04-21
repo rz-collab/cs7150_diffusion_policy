@@ -8,3 +8,4 @@ ckpts/
 runs/
 CLAUDE.md
 .vscode/*
+temp/

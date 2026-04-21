@@ -70,6 +70,7 @@ BATCH_SIZE = 64
 NUM_EPOCHS = 50
 GRAD_CLIP_NORM = 1.0
 NUM_WARMUP_STEPS = 500
+DISABLE_TASK_PARAPHRASE = True
 
 # == Other cfg ==
 MODEL_LOAD_PATH = None
@@ -114,21 +115,23 @@ if __name__ == "__main__":
     task_descriptions_by_task: dict[str, list[str]] | None = None
     desc_path: str = cfg.get("task_descriptions_path", "")
     desc_key: str = cfg.get("train_task_suite", ENV)
-    if TEXT_ENCODER is not None and desc_path and os.path.exists(desc_path):
-        with open(desc_path, "r") as f:
-            all_descriptions: dict = json.load(f)
-        entry = all_descriptions.get(desc_key, [])
-        if isinstance(entry, dict):
-            # Multi-task: entry maps task language to description lists
-            task_descriptions_by_task = entry if entry else None
-        elif isinstance(entry, list):
-            task_descriptions = entry
-        n_descs: int = (
-            len(task_descriptions_by_task)
-            if task_descriptions_by_task
-            else len(task_descriptions)
-        )
-        logger.info(f"Loaded {n_descs} description entries for {desc_key}")
+
+    if not DISABLE_TASK_PARAPHRASE:
+        if TEXT_ENCODER is not None and desc_path and os.path.exists(desc_path):
+            with open(desc_path, "r") as f:
+                all_descriptions: dict = json.load(f)
+            entry = all_descriptions.get(desc_key, [])
+            if isinstance(entry, dict):
+                # Multi-task: entry maps task language to description lists
+                task_descriptions_by_task = entry if entry else None
+            elif isinstance(entry, list):
+                task_descriptions = entry
+            n_descs: int = (
+                len(task_descriptions_by_task)
+                if task_descriptions_by_task
+                else len(task_descriptions)
+            )
+            logger.info(f"Loaded {n_descs} description entries for {desc_key}")
 
     # === Data ===
     if ENV == "pusht":
