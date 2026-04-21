@@ -72,6 +72,9 @@
 #               image_key to match the new suite's LIBERO_CONFIGS entry. run_session
 #               return type extended to include final suite name; run_server uses it
 #               as env_key in save_video so videos are tagged with the active suite.
+#   2026-04-20 | Prompt: Return suite_name in get_tasks so client knows which suite
+#               is active without injecting it manually | Added suite_name field to
+#               each task dict in the get_tasks response using current_suite_name.
 # ---
 
 """
@@ -393,7 +396,7 @@ def run_session(
 
         if cmd == "get_tasks":
             task_info = [
-                {"idx": t["idx"], "name": t["name"], "description": t["description"]}
+                {"idx": t["idx"], "name": t["name"], "description": t["description"], "suite_name": current_suite_name}
                 for t in tasks
             ]
             response = {"status": "ok", "tasks": task_info}
