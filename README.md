@@ -71,11 +71,7 @@ cs7150_diffusion_policy/
 │   ├── rel2abs.py                             # Convert LIBERO HDF5 demos rel→abs actions (libero env) | 2 min/task, ~4+ hrs total
 │   ├── compare_actions.py                     # Verify absolute action conversion (libero env) | smoke test
 │   ├── test_env.py                            # Environment obs structure test (diff_policy)
-│   ├── download_pusht_dataset.py              # Download PushT from Google Drive (diff_policy)
-│   ├── pusht_env_xample.py                    # Minimal PushT random-action example (diff_policy)
-│   ├── demo.ipynb                             # Example notebook workflow
-│   ├── test_libero_control.ipynb              # LIBERO control testing
-│   └── test_libero_abs_direct.ipynb           # Absolute action LIBERO testing
+│   └── download_pusht_dataset.py              # Download PushT from Google Drive (diff_policy)
 │
 ├── data/                                      # Create manually: mkdir data (download here)
 │   ├── pusht/                                 # PushT zarr dataset (from download_pusht_dataset.py)
