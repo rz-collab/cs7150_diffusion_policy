@@ -158,7 +158,9 @@ The action dimension is 7: (px,py,pz,rx,ry,rz,gripper) and they're relative pose
 
 ## Training Models
 
-Each of the models are simple to train. To adjust how the models train, inside the `scripts/train.py` file at the top you will see bolded variables. This defines the training parameters we used. The ones we modified for our training were `VISION_ENCODER`, `LANG_PROJ_DIM`, `FREEZE_VISION_ENCODER`, and `FREEZE_TEXT_ENCODER`. These define what encoders where used for vision and language and if they were frozen (no adjustments to the parameters). There are comments above with the available models/what you can input into the models.
+Training parameters are split in scripts/train.py and diffusion_policy/env_config.py
+- Adjusting training hyperparameters (declared as constants at the top) in scripts/train.py. e.g., `VISION_ENCODER`, `LANG_PROJ_DIM`, `FREEZE_VISION_ENCODER`, and `FREEZE_TEXT_ENCODER`.
+- Adjust datasets to train the model are, what environment it uses, some other rarely changed hyperparams like observation horizon in  `diffusion_policy/env_config.py`. 
 
 Below are the commands to train the models.
 
