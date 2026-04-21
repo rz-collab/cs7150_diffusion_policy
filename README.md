@@ -160,8 +160,6 @@ The action dimension is 7: (px,py,pz,rx,ry,rz,gripper) and they're relative pose
 
 Each of the models are simple to train. To adjust how the models train, inside the `scripts/train.py` file at the top you will see bolded variables. This defines the training parameters we used. The ones we modified for our training were `VISION_ENCODER`, `LANG_PROJ_DIM`, `FREEZE_VISION_ENCODER`, and `FREEZE_TEXT_ENCODER`. These define what encoders where used for vision and language and if they were frozen (no adjustments to the parameters). There are comments above with the available models/what you can input into the models.
 
-You can configure more aspects of the training of the model inside `diffusion_policy/env_config.py`. Here it is specified where the datasets to train the model are, what environment it uses, and any other specifics about the environment and training setup. To train to match what we used for our paper, change nothing here. Otherwise if you want to do more with our training setup, you can adjust the parameters here, just be careful and make sure you know what you are changing. The keys should be sufficiently self-explainatory.
-
 Below are the commands to train the models.
 
 Train for PushT task.
