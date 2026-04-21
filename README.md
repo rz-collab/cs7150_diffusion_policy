@@ -230,24 +230,11 @@ Modes:
 - `validate`: evaluates init states `0-19`
 - `test`: evaluates init states `20-39`
 
-Run validation with one server:
-```bash
-conda activate libero
-python scripts/libero_env_server.py --env libero_10 --port 5555
-```
-
-In a second terminal:
-```bash
-conda activate diff_policy
-python scripts/evaluate.py validate --checkpoints-dir ckpts/eval --zmq-address tcp://localhost:5555 --num-envs 1
-```
-
-Run faster validation with 4 parallel servers:
+Run faster validation with 4 (lower if environments keep failing) parallel servers:
 ```bash
 conda activate libero
 python scripts/libero_env_server.py --env libero_10 --num-server 4
 ```
-Note: I have used up to 6, however, the more you add the more unstable it becomes. I found more than 6 was too unstable to use and slowed you down more than saved time.
 
 Then run evaluation:
 ```bash
