@@ -122,6 +122,17 @@
 #               total startup time = min(all_ready, startup_timeout_s=30s).
 #               Workers that miss the deadline are marked dead and skipped;
 #               evaluation starts immediately with whoever connected.
+#   2026-04-20 | Prompt: Fix broken build_csv_row body; add init_states column |
+#               build_csv_row body was referencing undefined vars (all_task_names,
+#               col_idx, suite, server_idx) from a partial earlier edit — replaced
+#               with correct enumerate(tasks) loop. Added init_states: str = ""
+#               param and row["init_states"] column. Defined init_states_str in
+#               main() after init_state_idxs is finalized. Fixed _merge_fieldnames
+#               and _init_csv to treat init_states as a fixed column after model.
+#               Fixed _load_progress call missing tasks arg. Removed stale
+#               seen_task_names/unseen_task_names/unseen_suite vars and replaced all
+#               6 build_csv_row call sites to pass available_tasks/UNSEEN_TASKS
+#               and init_states_str directly.
 #   2026-04-20 | Prompt: Change CSV column format to use numeric task indices |
 #               Replaced per-task columns from <task_name>_successes/<task_name>_attempts
 #               to {idx}_successes/{idx}_attempts/{idx}_suite. Removed suite,
@@ -806,6 +817,7 @@ def build_csv_row(
     model_name: str,
     task_results: dict[str, dict[str, int]],
     tasks: list[dict],
+    init_states: str = "",
 ) -> tuple[dict, float]:
     """Flatten per-task counts into a CSV row and compute the avg success rate.
 
@@ -813,14 +825,14 @@ def build_csv_row(
     partial rows can be written mid-checkpoint. avg_rate is computed over
     evaluated tasks only.
     """
-    row: dict = {"model": model_name}
+    row: dict = {"model": model_name, "init_states": init_states}
     rate_sum: float = 0.0
     n_tasks: int = 0
 
-    ordered: list[str] = (
-        all_task_names if all_task_names is not None else list(task_results.keys())
-    )
-    for task_name in ordered:
+    for col_idx, t in enumerate(tasks):
+        task_name: str = t["name"]
+        suite: str = t.get("suite_name", "")
+        server_idx: int = t["idx"]
         if task_name in task_results:
             s: int = task_results[task_name]["successes"]
             a: int = task_results[task_name]["attempts"]
@@ -867,8 +879,8 @@ def _merge_fieldnames(existing: list[str], tasks: list[dict]) -> list[str]:
         for col in [f"{col_idx}_successes", f"{col_idx}_attempts", f"{col_idx}_suite", f"{col_idx}_task_name", f"{col_idx}_idx"]
         if col not in existing_set
     ]
-    base: list[str] = [c for c in existing if c not in {"model", "avg_success_rate"}]
-    return ["model"] + base + new_task_cols + ["avg_success_rate"]
+    base: list[str] = [c for c in existing if c not in {"model", "init_states", "avg_success_rate"}]
+    return ["model", "init_states"] + base + new_task_cols + ["avg_success_rate"]
 
 
 def write_csv(
@@ -965,7 +977,7 @@ def _init_csv(output_path: str, tasks: list[dict], force: bool = False) -> None:
     existing columns and data intact.
     """
     if force or not os.path.exists(output_path):
-        fieldnames: list[str] = ["model"]
+        fieldnames: list[str] = ["model", "init_states"]
         for col_idx in range(len(tasks)):
             fieldnames.extend([f"{col_idx}_successes", f"{col_idx}_attempts", f"{col_idx}_suite", f"{col_idx}_task_name", f"{col_idx}_idx"])
         fieldnames.append("avg_success_rate")
@@ -1170,6 +1182,8 @@ def main() -> None:
             min(init_state_idxs.stop, init_state_idxs.start + args.max_episodes),
         )
 
+    init_states_str: str = f"{init_state_idxs.start}-{init_state_idxs.stop - 1}"
+
     cfg: dict = {**get_env_config(args.env), "zmq_address": args.zmq_address}
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -1222,12 +1236,12 @@ def main() -> None:
     logger.info(
         f"Tasks ({len(available_tasks)}): {[t['name'] for t in available_tasks]}"
     )
-    seen_task_names: list[str] = [t["name"] for t in available_tasks]
+
 
     seen_csv: str = os.path.join(args.output_dir, f"seen_tasks_{args.mode}.csv")
 
     if not args.restart and os.path.exists(seen_csv):
-        seen_completed, seen_partial = _load_progress(seen_csv)
+        seen_completed, seen_partial = _load_progress(seen_csv, available_tasks)
         logger.info(
             f"Resuming seen evaluation: {len(seen_completed)} checkpoint(s) already done."
         )
@@ -1240,7 +1254,7 @@ def main() -> None:
 
     seen_rows: list[dict] = [
         build_csv_row(
-            p.name, seen_completed[p.name], seen_task_names, seen_suite, init_states_str
+            p.name, seen_completed[p.name], available_tasks, init_states_str
         )[0]
         for p in ckpt_files
         if p.name in seen_completed
@@ -1259,10 +1273,10 @@ def main() -> None:
             ckpt_name: str = ckpt_path.name,
         ) -> None:
             partial_row, _ = build_csv_row(
-                ckpt_name, current_results, seen_task_names, seen_suite, init_states_str
+                ckpt_name, current_results, available_tasks, init_states_str
             )
             write_csv(
-                seen_csv, seen_rows + [partial_row], seen_task_names, verbose=False
+                seen_csv, seen_rows + [partial_row], available_tasks, verbose=False
             )
 
         task_results: dict[str, dict[str, int]] = evaluate_on_tasks(
@@ -1280,7 +1294,7 @@ def main() -> None:
         )
 
         row, avg = build_csv_row(
-            ckpt_path.name, task_results, seen_task_names, seen_suite, init_states_str
+            ckpt_path.name, task_results, available_tasks, init_states_str
         )
         logger.info(f"{ckpt_path.name} — seen avg success: {avg:.2%}")
         seen_rows.append(row)
@@ -1298,10 +1312,6 @@ def main() -> None:
                 "Populate UNSEEN_TASKS at the top of evaluate.py."
             )
         else:
-            unseen_task_names: list[str] = [t["name"] for t in UNSEEN_TASKS]
-            unseen_suite: str = ",".join(
-                sorted(set(t["suite_name"] for t in UNSEEN_TASKS))
-            )
             unseen_csv: str = os.path.join(
                 args.output_dir, f"unseen_tasks_{args.mode}.csv"
             )
@@ -1322,8 +1332,7 @@ def main() -> None:
                 build_csv_row(
                     p.name,
                     unseen_completed[p.name],
-                    unseen_task_names,
-                    unseen_suite,
+                    UNSEEN_TASKS,
                     init_states_str,
                 )[0]
                 for p in ckpt_files
@@ -1349,14 +1358,13 @@ def main() -> None:
                     partial_row, _ = build_csv_row(
                         ckpt_name,
                         current_results,
-                        unseen_task_names,
-                        unseen_suite,
+                        UNSEEN_TASKS,
                         init_states_str,
                     )
                     write_csv(
                         unseen_csv,
                         unseen_rows + [partial_row],
-                        unseen_task_names,
+                        UNSEEN_TASKS,
                         verbose=False,
                     )
 
@@ -1377,8 +1385,7 @@ def main() -> None:
                 row, avg = build_csv_row(
                     ckpt_path.name,
                     task_results,
-                    unseen_task_names,
-                    unseen_suite,
+                    UNSEEN_TASKS,
                     init_states_str,
                 )
                 logger.info(f"{ckpt_path.name} — unseen avg success: {avg:.2%}")
