@@ -261,16 +261,6 @@ conda activate diff_policy
 python scripts/evaluate.py test --checkpoints-dir ckpts/eval --run-on-unseen
 ```
 
-Useful flags:
-- `--output-dir eval_results` to control CSV output location
-- `--max-episodes N` for a quick smoke test
-- `--restart` to ignore existing CSV progress and start fresh
-
-Output files:
-- `eval_results/seen_tasks_validate.csv` or `eval_results/seen_tasks_test.csv`
-- `eval_results/unseen_tasks_test.csv` (only when `--run-on-unseen` is enabled)
-
-
 ## Known Issues
 - tensorboard fix if you get the bug for no module found pkg_resources: https://github.com/Nerogar/OneTrainer/issues/1304
 
