@@ -205,6 +205,8 @@ conda activate libero
 python scripts/libero_env_server.py --env libero_10 --port 5555
 ```
 
+Add the argument `--save-video` to save a video of the task being completed.
+
 ### Inference
 
 These are inference scripts which do not require the usage of the notebook (`inference_demo.ipynb`).
