@@ -1,10 +1,3 @@
-# ---
-# Generated: 2026-04-17 | claude-sonnet-4-6
-# Prompt: Shared abstract base class for visual and language encoders, extracted
-#         from VisualEncoder in visual_encoder.py so both encoder families can
-#         inherit from a single common interface.
-# ---
-
 from abc import ABC, abstractmethod
 
 import torch.nn as nn

@@ -1,5 +1,4 @@
 # Adapted from https://github.com/2toinf/X-VLA/blob/main/evaluation/libero/rel2abs.py
-# Refined with Claude to change all hdf5 files of a give input dir to map relative actions to absolute actions
 
 from libero.libero import benchmark, get_libero_path
 from libero.libero.envs import OffScreenRenderEnv

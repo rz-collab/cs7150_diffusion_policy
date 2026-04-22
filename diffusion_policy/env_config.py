@@ -1,35 +1,3 @@
-# ---
-# Generated: 2026-04-06 03:00 UTC
-# Model: claude-opus-4-6
-# Prompt: Create a shared environment config system so inference (and later training)
-#         can switch between PushT, LIBERO, and other envs via a single flag.
-# Modifications:
-#   2026-04-14 | Prompt: Add ZMQ socket support for LIBERO | Added zmq_address field
-#               to LIBERO configs so inference connects to the remote env server
-#               instead of importing libero directly
-#   2026-04-14 | Prompt: Make control_delta a changeable setting | Added control_delta
-#               field to LIBERO configs (default True) so users can switch between
-#               delta and absolute position action modes
-#   2026-04-15 | Prompt: Centralize task_descriptions_path in env config | Added
-#               task_descriptions_path field to each env config so train and
-#               inference scripts read the path from config instead of hardcoding it.
-#   2026-04-15 | Prompt: Switch LIBERO to absolute actions | Changed control_delta
-#               from True to False so env config matches absolute-position mode
-#               used by all LIBERO task suites.
-#   2026-04-19 | Prompt: dataset_path is now a base directory; full path is
-#               dataset_path/train_task_suite | Changed libero dataset_path from
-#               ["data/libero_abs"] (a list with the suite baked in) to the bare
-#               string "data/libero_abs" so callers join it with train_task_suite
-#               at runtime. This lets you point at different suites without
-#               editing the path field directly.
-# ---
-
-# NOTE: This is a temporary file to integrate the two different environments frameworks.
-# TODO: Test out the code to make sure it functions properly. Make sure loading the environment
-# works properly and that its possible to change the environment, datasets, model parameters.
-# Make sure that these are worth keeping or if there is anything I should change to make it
-# better/function better.
-
 # |o|o|                             observations: 2
 # | |a|a|a|a|a|a|a|a|               actions executed: 8
 # |p|p|p|p|p|p|p|p|p|p|p|p|p|p|p|p| actions predicted: 16

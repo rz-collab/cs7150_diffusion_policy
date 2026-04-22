@@ -1,17 +1,3 @@
-# ---
-# Generated: 2025-01-01 | claude-opus-4-6
-# Prompt: PushTImageDataset and helper functions for loading pusht zarr data
-# Modifications:
-#   2026-04-14 | Prompt: Add text descriptions for diffusion model conditioning | Added descriptions_path param to PushTDataset, loads JSON descriptions and returns a random one per sample in __getitem__
-#   2026-04-14 | Prompt: Accept descriptions list directly | Changed from
-#               descriptions_path to a descriptions list param so the caller
-#               resolves the task from task_descriptions.json.
-#   2026-04-14 | Prompt: Per-sample language dropout | Moved language dropout
-#               from training loop into __getitem__.  With lang_dropout_prob,
-#               individual samples return "" instead of a real description,
-#               letting the model learn an unconditional embedding per-sample.
-# ---
-
 # @markdown ### **Dataset**
 # @markdown
 # @markdown Defines `PushTImageDataset` and helper functions
