@@ -180,10 +180,7 @@ Train for LIBERO task.
 python scripts/train.py --env libero
 ```
 
-### Visualizing the Training Process
-
-You can visualize the train loss via tensorboard. Run the command below inside the diff_policy environment and will show you the training loss over the number of steps the model has taken over all training sessions.
-
+Run the command below inside the diff_policy environment to view the training progress and loss.
 ```bash
 tensorboard --logdir runs/
 ```
@@ -209,6 +206,8 @@ python scripts/libero_env_server.py --env libero_10 --port 5555
 ```
 
 ### Inference
+
+These are inference scripts which do not require the usage of the notebook (`inference_demo.ipynb`).
 
 PushT inference (no server needed):
 ```bash
