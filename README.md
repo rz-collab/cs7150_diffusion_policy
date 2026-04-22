@@ -41,10 +41,16 @@ pip install -e .
 
 Now the repo should be fully setup and you are ready to use it with our code.
 
+### Quick Start
+
+We have simplified our code into a notebook, so you can test out one of our pretrained models. Now that you have everything install you are all set and ready to use `inference_demo.ipynb`. Just go to the notebook and follow the instructions and you will have a running version of our model.
+
 ## Code Overview
 
 ```
 cs7150_diffusion_policy/
+│── inference_demo.ipynb                       # Notebook to run inference on the best performing model
+│
 ├── diffusion_policy/                          # Main package (use: diff_policy env)
 │   ├── env_config.py                          # Config registry for dims, paths, ZMQ address
 │   ├── remote_env.py                          # ZMQ client for remote LIBERO environment
