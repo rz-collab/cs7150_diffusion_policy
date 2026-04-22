@@ -268,16 +268,3 @@ Notebook Code: [https://colab.research.google.com/drive/18GIHeOQ5DyjMN8iIRZL2EKZ
 The other Paper used is LIBERO which is a benchmark dataset used for imitation learning in many different tasks. Below are websites linked to it to help with implementation and reference.
 
 Dataset Website: [https://libero-project.github.io/main.html](https://libero-project.github.io/main.html)
-
-#### Downloading LIBERO and Datasets
-To download libero you run the commands as follows. First you need to add the submodule. The submodule while originates from their repo, its a fork with small changes we made to make it work better with our environment.
-
-Add the submodule with the following command:
-```bash
-git submodule update --init
-```
-
-After you add it, follow their instructions to install it as a separate conda environment. After that, install the datasets with the following command.
-```bash
-python submodules/LIBERO/benchmark_scripts/download_libero_datasets.py --use-huggingface
-```
